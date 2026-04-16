@@ -1,0 +1,25 @@
+[package]
+name = "lz4-pure-rs"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-2-Clause"
+description = "Pure Rust LZ4 library with the lz4-rs API."
+
+[lib]
+name = "lz4"
+
+[[bin]]
+name = "lz4"
+path = "src/bin/lz4.rs"
+required-features = ["cli"]
+
+[features]
+default = []
+cli = ["dep:clap"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"], optional = true }
+libc = "0.2"
+
+[dev-dependencies]
+rand = ">=0.7, <=0.8"
