@@ -194,7 +194,10 @@ fn compress(
         .block_checksum(BlockChecksum::NoBlockChecksum)
         .checksum(ContentChecksum::ChecksumEnabled);
     let mut encoder = builder.build(writer)?;
-    io::copy(reader, &mut encoder)?;
+    // Use a 4 MiB staging buffer instead of `io::copy`'s 8 KiB stack buffer
+    // so the frame block size (also 4 MiB for larger files) is fed to the
+    // encoder in one shot and we don't pay per-8KB `memmove` overhead.
+    copy_large(reader, &mut encoder)?;
     let (mut writer, result) = encoder.finish();
     result?;
     writer.flush()

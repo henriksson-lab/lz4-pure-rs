@@ -2529,16 +2529,7 @@ fn compress_block_with_dict(
         loop {
             let match_len =
                 MINMATCH + count_match(&full, ip + MINMATCH, ref_pos + MINMATCH, match_limit);
-            op = encode_sequence_with_base(
-                &full,
-                dst,
-                base,
-                anchor,
-                ip,
-                match_len,
-                ip - ref_pos,
-                op,
-            )?;
+            op = encode_sequence(&full, dst, anchor, ip, match_len, ip - ref_pos, op)?;
             ip += match_len;
             anchor = ip;
 
@@ -2584,14 +2575,27 @@ struct HcTables {
     hash: Vec<usize>,
     chain: Vec<usize>,
     next_to_update: usize,
+    /// Offset inside the search buffer where the current prefix begins.
+    /// For no-dict compression this is `0`; when a dictionary is prepended
+    /// before the input, it is `dict.len()`. Equivalent to upstream's
+    /// `prefixPtr` in that `prefixPtr == &full[base]`. Used by the HC
+    /// pattern-analysis branch to replicate upstream's `protectDictEnd`
+    /// guard so the repeated-pattern fast path is not entered when a
+    /// dict-area candidate sits in the last 3 bytes before the prefix.
+    base: usize,
 }
 
 impl HcTables {
-    fn new(src_len: usize) -> Self {
+    fn with_base(_src_len: usize, base: usize) -> Self {
+        // Upstream allocates `chainTable[LZ4HC_MAXD]` as a fixed-size struct
+        // field that is always non-null. Match that so the hot `find_hc_*`
+        // inner loop doesn't need a per-read empty-chain guard. Also drops
+        // the branch from `table.previous()` on any other access.
         Self {
             hash: vec![usize::MAX; LZ4HC_HASH_SIZE],
-            chain: vec![usize::MAX; cmp::min(src_len, LZ4_DISTANCE_MAX + 1)],
+            chain: vec![usize::MAX; LZ4_DISTANCE_MAX + 1],
             next_to_update: 0,
+            base,
         }
     }
 
@@ -2601,9 +2605,7 @@ impl HcTables {
         while self.next_to_update < end {
             let pos = self.next_to_update;
             let h = hash4_hc(src, pos);
-            if !self.chain.is_empty() {
-                self.chain[pos & LZ4_DISTANCE_MAX] = self.hash[h];
-            }
+            self.chain[pos & LZ4_DISTANCE_MAX] = self.hash[h];
             self.hash[h] = pos;
             self.next_to_update += 1;
         }
@@ -2611,11 +2613,7 @@ impl HcTables {
 
     #[inline]
     fn previous(&self, pos: usize) -> usize {
-        if self.chain.is_empty() {
-            usize::MAX
-        } else {
-            self.chain[pos & LZ4_DISTANCE_MAX]
-        }
+        self.chain[pos & LZ4_DISTANCE_MAX]
     }
 }
 
@@ -2765,7 +2763,7 @@ fn compress_block_lz4mid_with_base(full: &[u8], dst: &mut [u8], base: usize) -> 
         table.add8_index(full, ip + 2, search_ip + 2);
         table.add4_index(full, ip + 1, search_ip + 1);
 
-        op = encode_sequence_with_base(full, dst, base, anchor, ip, match_len, match_distance, op)?;
+        op = encode_sequence(full, dst, anchor, ip, match_len, match_distance, op)?;
         ip += match_len;
         anchor = ip;
 
@@ -2791,13 +2789,9 @@ fn compress_block_hc(
     compression_level: c_int,
     favor_dec_speed: bool,
 ) -> Option<usize> {
-    if src.is_empty() {
+    if src.is_empty() || src.len() < MFLIMIT + 1 {
         return emit_last_literals(src, dst, 0, 0);
     }
-    if src.len() < MFLIMIT + 1 {
-        return emit_last_literals(src, dst, 0, 0);
-    }
-
     let level = normalize_hc_level(compression_level);
     if level <= 2 {
         return compress_block_lz4mid(src, dst);
@@ -2805,22 +2799,43 @@ fn compress_block_hc(
     if level >= 10 {
         return compress_block_hc_optimal(src, dst, 0, level, favor_dec_speed);
     }
+    compress_block_hc_hashchain(src, dst, 0, compression_level)
+}
 
+/// Upstream `LZ4HC_compress_hashChain()` port, shared between no-dict and
+/// dict compression. `base` is the offset inside `full` where the input to be
+/// emitted starts; `full[..base]` is retained history (either empty or the
+/// concatenated dictionary).
+fn compress_block_hc_hashchain(
+    full: &[u8],
+    dst: &mut [u8],
+    base: usize,
+    compression_level: c_int,
+) -> Option<usize> {
     let attempts = hc_search_attempts(compression_level);
-    let mut table = HcTables::new(src.len());
-    let mut anchor = 0usize;
+    let mut table = HcTables::with_base(full.len(), base);
+    if base > 0 {
+        table.insert_until(full, base);
+    }
+    let wider_flags = if attempts > 128 {
+        HC_FLAG_PATTERN_ANALYSIS
+    } else {
+        0
+    };
+
+    let mut anchor = base;
     let mut op = 0usize;
-    let mflimit = src.len() - MFLIMIT;
-    let match_limit = src.len() - LAST_LITERALS;
+    let mflimit = full.len() - MFLIMIT;
+    let match_limit = full.len() - LAST_LITERALS;
     let nomatch = HcMatch {
         start: 0,
         len: 0,
         off: 0,
     };
-    let mut ip = 0usize;
+    let mut ip = base;
 
     while ip <= mflimit {
-        let mut m1 = find_hc_match(src, &mut table, ip, match_limit, attempts);
+        let mut m1 = find_hc_match(full, &mut table, ip, match_limit, attempts);
         if m1.len < MINMATCH {
             ip += 1;
             continue;
@@ -2834,16 +2849,14 @@ fn compress_block_hc(
             if ip + m1.len <= mflimit {
                 start2 = ip + m1.len - 2;
                 m2 = find_hc_wider_match(
-                    src,
+                    full,
                     &mut table,
                     start2,
                     ip,
                     match_limit,
                     m1.len,
                     attempts,
-                    attempts > 128,
-                    false,
-                    false,
+                    wider_flags,
                 );
                 start2 = m2.start;
             } else {
@@ -2852,7 +2865,7 @@ fn compress_block_hc(
             }
 
             if m2.len <= m1.len {
-                op = encode_sequence(src, dst, anchor, ip, m1.len, m1.off, op)?;
+                op = encode_sequence(full, dst, anchor, ip, m1.len, m1.off, op)?;
                 ip += m1.len;
                 anchor = ip;
                 break 'search2;
@@ -2888,16 +2901,14 @@ fn compress_block_hc(
                 if start2 + m2.len <= mflimit {
                     start3 = start2 + m2.len - 3;
                     m3 = find_hc_wider_match(
-                        src,
+                        full,
                         &mut table,
                         start3,
                         start2,
                         match_limit,
                         m2.len,
                         attempts,
-                        attempts > 128,
-                        false,
-                        false,
+                        wider_flags,
                     );
                     start3 = m3.start;
                 } else {
@@ -2909,12 +2920,12 @@ fn compress_block_hc(
                     if start2 < ip + m1.len {
                         m1.len = start2 - ip;
                     }
-                    op = encode_sequence(src, dst, anchor, ip, m1.len, m1.off, op)?;
+                    op = encode_sequence(full, dst, anchor, ip, m1.len, m1.off, op)?;
                     ip += m1.len;
                     anchor = ip;
 
                     ip = start2;
-                    op = encode_sequence(src, dst, anchor, ip, m2.len, m2.off, op)?;
+                    op = encode_sequence(full, dst, anchor, ip, m2.len, m2.off, op)?;
                     ip += m2.len;
                     anchor = ip;
                     break 'search2;
@@ -2932,7 +2943,7 @@ fn compress_block_hc(
                                 m2 = m3;
                             }
                         }
-                        op = encode_sequence(src, dst, anchor, ip, m1.len, m1.off, op)?;
+                        op = encode_sequence(full, dst, anchor, ip, m1.len, m1.off, op)?;
                         ip += m1.len;
                         anchor = ip;
 
@@ -2967,7 +2978,7 @@ fn compress_block_hc(
                     }
                 }
 
-                op = encode_sequence(src, dst, anchor, ip, m1.len, m1.off, op)?;
+                op = encode_sequence(full, dst, anchor, ip, m1.len, m1.off, op)?;
                 ip += m1.len;
                 anchor = ip;
 
@@ -2980,7 +2991,7 @@ fn compress_block_hc(
         }
     }
 
-    emit_last_literals(src, dst, anchor, op)
+    emit_last_literals_with_base(full, dst, base, anchor, op)
 }
 
 fn compress_block_hc_with_dict(
@@ -3010,64 +3021,7 @@ fn compress_block_hc_with_dict(
     if level >= 10 {
         return compress_block_hc_optimal(&full, dst, base, level, favor_dec_speed);
     }
-    let attempts = hc_search_attempts(compression_level);
-    let mut table = HcTables::new(full.len());
-    table.insert_until(&full, base);
-
-    let mut anchor = base;
-    let mut op = 0usize;
-    let mflimit = base + src.len() - MFLIMIT;
-    let match_limit = base + src.len() - LAST_LITERALS;
-    let mut ip = base;
-
-    while ip <= mflimit {
-        let mut m = find_hc_wider_match(
-            &full,
-            &mut table,
-            ip,
-            ip,
-            match_limit,
-            MINMATCH - 1,
-            attempts,
-            attempts > 128,
-            false,
-            false,
-        );
-        if m.len < MINMATCH {
-            ip += 1;
-            continue;
-        }
-
-        if ip + m.len <= mflimit {
-            let start2 = ip + m.len - 2;
-            let m2 = find_hc_wider_match(
-                &full,
-                &mut table,
-                start2,
-                ip,
-                match_limit,
-                m.len,
-                attempts,
-                attempts > 128,
-                false,
-                false,
-            );
-            if m2.len > m.len && m2.start - ip >= 3 {
-                if m2.start < ip + m.len {
-                    m.len = m2.start - ip;
-                }
-            } else if m2.len > m.len && m2.start - ip < 3 {
-                ip = m2.start;
-                m = m2;
-            }
-        }
-
-        op = encode_sequence_with_base(&full, dst, base, anchor, ip, m.len, m.off, op)?;
-        ip += m.len;
-        anchor = ip;
-    }
-
-    emit_last_literals(src, dst, anchor - base, op)
+    compress_block_hc_hashchain(&full, dst, base, compression_level)
 }
 
 fn compress_block_hc_optimal(
@@ -3088,7 +3042,7 @@ fn compress_block_hc_optimal(
     let attempts = hc_search_attempts(compression_level);
     let sufficient_len = hc_target_length(compression_level).min(LZ4_OPT_NUM - 1);
     let full_update = normalize_hc_level(compression_level) >= LZ4HC_CLEVEL_MAX;
-    let mut table = HcTables::new(full.len());
+    let mut table = HcTables::with_base(full.len(), base);
     if base > 0 {
         table.insert_until(full, base);
     }
@@ -3127,16 +3081,7 @@ fn compress_block_hc_optimal(
         }
 
         if first_match.len > sufficient_len {
-            op = encode_sequence_with_base(
-                full,
-                dst,
-                base,
-                anchor,
-                ip,
-                first_match.len,
-                first_match.off,
-                op,
-            )?;
+            op = encode_sequence(full, dst, anchor, ip, first_match.len, first_match.off, op)?;
             ip += first_match.len;
             anchor = ip;
             continue;
@@ -3314,7 +3259,7 @@ fn compress_block_hc_optimal(
                 continue;
             }
             rpos += ml;
-            op = encode_sequence_with_base(full, dst, base, anchor, ip, ml, offset, op)?;
+            op = encode_sequence(full, dst, anchor, ip, ml, offset, op)?;
             ip += ml;
             anchor = ip;
         }
@@ -3487,6 +3432,10 @@ fn append_hc_dictionary(dictionary: &mut Vec<u8>, src: &[u8]) {
     }
 }
 
+const HC_FLAG_PATTERN_ANALYSIS: u32 = 1 << 0;
+const HC_FLAG_CHAIN_SWAP: u32 = 1 << 1;
+const HC_FLAG_FAVOR_DEC_SPEED: u32 = 1 << 2;
+
 fn find_hc_match(
     src: &[u8],
     table: &mut HcTables,
@@ -3494,6 +3443,11 @@ fn find_hc_match(
     match_limit: usize,
     max_attempts: usize,
 ) -> HcMatch {
+    let flags = if max_attempts > 128 {
+        HC_FLAG_PATTERN_ANALYSIS
+    } else {
+        0
+    };
     find_hc_wider_match(
         src,
         table,
@@ -3502,9 +3456,7 @@ fn find_hc_match(
         match_limit,
         MINMATCH - 1,
         max_attempts,
-        max_attempts > 128,
-        false,
-        false,
+        flags,
     )
 }
 
@@ -3517,6 +3469,10 @@ fn find_hc_longer_match(
     max_attempts: usize,
     favor_dec_speed: bool,
 ) -> HcMatch {
+    let mut flags = HC_FLAG_PATTERN_ANALYSIS | HC_FLAG_CHAIN_SWAP;
+    if favor_dec_speed {
+        flags |= HC_FLAG_FAVOR_DEC_SPEED;
+    }
     let m = find_hc_wider_match(
         src,
         table,
@@ -3525,9 +3481,7 @@ fn find_hc_longer_match(
         match_limit,
         min_len,
         max_attempts,
-        true,
-        true,
-        favor_dec_speed,
+        flags,
     );
     if m.len <= min_len {
         HcMatch {
@@ -3553,10 +3507,11 @@ fn find_hc_wider_match(
     match_limit: usize,
     longest: usize,
     max_attempts: usize,
-    pattern_analysis: bool,
-    chain_swap: bool,
-    favor_dec_speed: bool,
+    flags: u32,
 ) -> HcMatch {
+    let pattern_analysis = flags & HC_FLAG_PATTERN_ANALYSIS != 0;
+    let chain_swap = flags & HC_FLAG_CHAIN_SWAP != 0;
+    let favor_dec_speed = flags & HC_FLAG_FAVOR_DEC_SPEED != 0;
     table.insert_until(src, ip);
     if ip + MINMATCH > match_limit {
         return HcMatch {
@@ -3578,14 +3533,41 @@ fn find_hc_wider_match(
     let repeated_pattern = is_repeated_pattern(pattern);
     let mut src_pattern_len = 0usize;
     let mut match_chain_pos = 0usize;
+    let src_ptr = src.as_ptr();
+    let src_len = src.len();
+    let look_back = ip - low_limit;
+    let prefix_base = table.base;
+    // `HcTables::with_base` always allocates `LZ4_DISTANCE_MAX + 1` entries,
+    // mirroring upstream's fixed-size `chainTable[LZ4HC_MAXD]`. This lets the
+    // inner loop load without an empty-chain guard.
+    let chain_ptr = table.chain.as_ptr();
 
-    while candidate != usize::MAX && candidate >= lowest && candidate < ip && attempts > 0 {
+    // Upstream: `while ((matchIndex >= lowestMatchIndex) && (nbAttempts > 0))`.
+    // We carry an extra `candidate < ip` because we don't use upstream's
+    // `dictLimit += 64 KiB` offset trick that keeps chain deltas from
+    // wrapping candidates past `ip`; this single bound subsumes both the
+    // "no previous" sentinel (the initial `usize::MAX` from an empty hash
+    // bucket) and the wrap case at the end of the chain walk.
+    while candidate < ip && candidate >= lowest && attempts > 0 {
         attempts -= 1;
         let mut match_len = 0usize;
-        if !(favor_dec_speed && ip - candidate < 8)
-            && candidate + MINMATCH <= src.len()
-            && read_u32_ptr(unsafe { src.as_ptr().add(candidate) })
-                == read_u32_ptr(unsafe { src.as_ptr().add(ip) })
+        let early_skip = favor_dec_speed && ip - candidate < 8;
+        // Upstream early-exit filter: before the 4-byte pattern compare,
+        // check 2 bytes at the shifted candidate's end-of-longest to skip
+        // candidates that cannot improve on the current best.len.
+        let mut passes_filter = true;
+        if !early_skip && best.len >= 1 && candidate >= look_back {
+            let ref_end = low_limit + best.len;
+            let cand_end = candidate - look_back + best.len;
+            if ref_end < src_len && cand_end < src_len {
+                let a = read_u16_ptr(unsafe { src_ptr.add(ref_end - 1) });
+                let b = read_u16_ptr(unsafe { src_ptr.add(cand_end - 1) });
+                passes_filter = a == b;
+            }
+        }
+        if !early_skip
+            && passes_filter
+            && read_u32_ptr(unsafe { src_ptr.add(candidate) }) == pattern
         {
             let forward =
                 MINMATCH + count_match(src, ip + MINMATCH, candidate + MINMATCH, match_limit);
@@ -3608,7 +3590,7 @@ fn find_hc_wider_match(
             let mut pos = 0usize;
             while pos < end {
                 let probe = candidate + pos;
-                let previous = table.previous(probe);
+                let previous = unsafe { *chain_ptr.add(probe & LZ4_DISTANCE_MAX) };
                 let step = accel >> 4;
                 accel += 1;
                 if previous != usize::MAX && previous < probe {
@@ -3631,7 +3613,7 @@ fn find_hc_wider_match(
         }
 
         let chain_probe = candidate + match_chain_pos;
-        let previous = table.previous(chain_probe);
+        let previous = unsafe { *chain_ptr.add(chain_probe & LZ4_DISTANCE_MAX) };
         if pattern_analysis
             && previous != usize::MAX
             && candidate > previous
@@ -3645,13 +3627,34 @@ fn find_hc_wider_match(
                     MINMATCH + count_pattern(src, ip + MINMATCH, match_limit, pattern);
             }
             let match_candidate = candidate - 1;
-            if match_candidate >= lowest
+            // Upstream's `LZ4HC_protectDictEnd` guards the repeated-pattern
+            // branch so a dict-area candidate that sits in the final 3 bytes
+            // before the current prefix (i.e. would straddle the dict/prefix
+            // boundary in ext-dict mode) is excluded. In our contiguous
+            // buffer model this collapses to requiring
+            // `match_candidate + 4 <= base` when the candidate is inside the
+            // dict; candidates at or past `base` are always fine (upstream's
+            // U32 wrap produces a value >= 3 in that case).
+            let protect_dict_end = prefix_base == 0
+                || match_candidate >= prefix_base
+                || match_candidate + MINMATCH <= prefix_base;
+            if protect_dict_end
+                && match_candidate >= lowest
                 && match_candidate + MINMATCH <= src.len()
                 && read_u32_ptr(unsafe { src.as_ptr().add(match_candidate) }) == pattern
             {
                 let forward =
                     MINMATCH + count_pattern(src, match_candidate + MINMATCH, match_limit, pattern);
-                let back = reverse_count_pattern(src, match_candidate, 0, pattern);
+                // Upstream reverse-counts the pattern back to either
+                // `prefixPtr` or `dictStart` depending on whether the
+                // candidate is in the current prefix or external dictionary,
+                // and then clamps the returned length so
+                // `matchCandidateIdx - backLength >= lowestMatchIndex`. Our
+                // contiguous-buffer model combines both bounds into the
+                // single `0` floor for `reverseCountPattern`, so we just
+                // apply the distance-based clamp afterwards.
+                let back_raw = reverse_count_pattern(src, match_candidate, 0, pattern);
+                let back = cmp::min(back_raw, match_candidate.saturating_sub(lowest));
                 let current_segment_len = back + forward;
                 let adjusted_to_segment_end =
                     current_segment_len >= src_pattern_len && forward <= src_pattern_len;
@@ -3735,15 +3738,28 @@ fn reverse_count_pattern(src: &[u8], mut pos: usize, low_limit: usize, pattern: 
 
 fn count_back(src: &[u8], ip: usize, candidate: usize, low_limit: usize) -> usize {
     let mut back = 0usize;
-    while ip > low_limit + back
-        && candidate > back
-        && src[ip - back - 1] == src[candidate - back - 1]
-    {
-        back += 1;
+    let max_back = cmp::min(ip - low_limit, candidate);
+    let src_ptr = src.as_ptr();
+    unsafe {
+        while back + 8 <= max_back {
+            let a = read_u64_ptr(src_ptr.add(ip - back - 8));
+            let b = read_u64_ptr(src_ptr.add(candidate - back - 8));
+            let diff = a ^ b;
+            if diff == 0 {
+                back += 8;
+            } else {
+                back += diff.leading_zeros() as usize / 8;
+                return back;
+            }
+        }
+        while back < max_back && *src_ptr.add(ip - back - 1) == *src_ptr.add(candidate - back - 1) {
+            back += 1;
+        }
     }
     back
 }
 
+#[inline]
 fn count_match(src: &[u8], mut ip: usize, mut match_pos: usize, limit: usize) -> usize {
     let start = ip;
     let src_ptr = src.as_ptr();
@@ -3764,6 +3780,7 @@ fn count_match(src: &[u8], mut ip: usize, mut match_pos: usize, limit: usize) ->
     ip - start
 }
 
+#[inline(always)]
 fn encode_sequence(
     src: &[u8],
     dst: &mut [u8],
@@ -3787,44 +3804,6 @@ fn encode_sequence(
         return None;
     }
     dst[op..op + lit_len].copy_from_slice(&src[anchor..ip]);
-    op += lit_len;
-    dst[op..op + 2].copy_from_slice(&(offset as u16).to_le_bytes());
-    op += 2;
-
-    let ml_code = match_len - MINMATCH;
-    dst[token_pos] = ((cmp::min(lit_len, 15) as u8) << 4) | cmp::min(ml_code, 15) as u8;
-    emit_len(dst, op, ml_code, 15)
-}
-
-fn encode_sequence_with_base(
-    src: &[u8],
-    dst: &mut [u8],
-    base: usize,
-    anchor: usize,
-    ip: usize,
-    match_len: usize,
-    offset: usize,
-    mut op: usize,
-) -> Option<usize> {
-    if anchor < base
-        || ip < anchor
-        || ip - base > src.len()
-        || offset == 0
-        || offset > LZ4_DISTANCE_MAX
-    {
-        return None;
-    }
-    let lit_len = ip - anchor;
-    let token_pos = op;
-    if op >= dst.len() {
-        return None;
-    }
-    op += 1;
-    op = emit_len(dst, op, lit_len, 15)?;
-    if op + lit_len + 2 > dst.len() {
-        return None;
-    }
-    dst[op..op + lit_len].copy_from_slice(&src[anchor..anchor + lit_len]);
     op += lit_len;
     dst[op..op + 2].copy_from_slice(&(offset as u16).to_le_bytes());
     op += 2;
@@ -8328,6 +8307,173 @@ mod tests {
                 let stream = LZ4_createStreamHC();
                 assert!(!stream.is_null());
                 LZ4_setCompressionLevel(stream, level);
+                assert_eq!(
+                    LZ4_loadDictHC(stream, dict.as_ptr() as *const c_char, dict.len() as c_int),
+                    dict.len() as c_int
+                );
+
+                let mut compressed = vec![0u8; LZ4_compressBound(input.len() as c_int) as usize];
+                let compressed_len = LZ4_compress_HC_continue(
+                    stream,
+                    input.as_ptr() as *const c_char,
+                    compressed.as_mut_ptr() as *mut c_char,
+                    input.len() as c_int,
+                    compressed.len() as c_int,
+                );
+                LZ4_freeStreamHC(stream);
+
+                assert_eq!(compressed_len as usize, expected.len(), "level {level}");
+                assert_eq!(
+                    &compressed[..compressed_len as usize],
+                    &expected,
+                    "level {level}"
+                );
+            }
+        }
+    }
+
+    /// Targeted byte-level parity check for HC pattern-analysis across the
+    /// dictionary/prefix boundary. The dictionary ends in a 200-byte run of
+    /// `'A'`, and the input also contains a 200-byte run of `'A'` partway
+    /// through, so the HC pattern-analysis branch can extend its pattern
+    /// reverse-count into the dict area only as far as upstream allows.
+    #[test]
+    fn hc_pattern_analysis_across_dict_boundary_matches_upstream_bytes() {
+        let mut dict = vec![b'A'; 200];
+        for i in 0..56 {
+            dict.push(b'a' + ((i % 26) as u8));
+        }
+        assert_eq!(dict.len(), 256);
+
+        let mut input = Vec::with_capacity(512);
+        for i in 0..64 {
+            input.push(b'b' + ((i % 13) as u8));
+        }
+        input.extend(std::iter::repeat_n(b'A', 200));
+        for i in 0..(512 - 264) {
+            input.push(b'c' + ((i % 13) as u8));
+        }
+        assert_eq!(input.len(), 512);
+
+        let cases: &[(c_int, &str)] = &[
+            (3, "091d000f0d00201f410100b408e0001f6f0d00d3506c6d6e6f63"),
+            (4, "091d000f0d00201f410100b40924010f0d00d3506c6d6e6f63"),
+            (5, "091d000f0d00201f410100b40924010f0d00d3506c6d6e6f63"),
+            (6, "091d000f0d00201f410100b40924010f0d00d3506c6d6e6f63"),
+            (7, "091d000f0d00201f410100b40924010f0d00d3506c6d6e6f63"),
+            (8, "091d000f0d00201f410100b40924010f0d00d3506c6d6e6f63"),
+            (9, "091d000f0d00200f4001b50924010f0d00d3506c6d6e6f63"),
+            (10, "091d000f0d00200f4001b50924010f0d00d3506c6d6e6f63"),
+            (11, "091d000f0d00200f4001b50924010f0d00d3506c6d6e6f63"),
+            (12, "091d000f0d00200f4001b50924010f0d00d3506c6d6e6f63"),
+        ];
+
+        for (level, expected_hex) in cases {
+            let expected = decode_hex(expected_hex);
+            unsafe {
+                let stream = LZ4_createStreamHC();
+                assert!(!stream.is_null());
+                LZ4_resetStreamHC_fast(stream, *level);
+                assert_eq!(
+                    LZ4_loadDictHC(stream, dict.as_ptr() as *const c_char, dict.len() as c_int),
+                    dict.len() as c_int
+                );
+
+                let mut compressed = vec![0u8; LZ4_compressBound(input.len() as c_int) as usize];
+                let compressed_len = LZ4_compress_HC_continue(
+                    stream,
+                    input.as_ptr() as *const c_char,
+                    compressed.as_mut_ptr() as *mut c_char,
+                    input.len() as c_int,
+                    compressed.len() as c_int,
+                );
+                LZ4_freeStreamHC(stream);
+
+                assert_eq!(compressed_len as usize, expected.len(), "level {level}");
+                assert_eq!(
+                    &compressed[..compressed_len as usize],
+                    &expected,
+                    "level {level}"
+                );
+            }
+        }
+    }
+
+    /// Byte-level parity check for `LZ4_compress_HC_continue()` on the
+    /// optimal HC levels (10..=12) with a 256-byte loaded dictionary and a
+    /// 1024-byte input. Mirrors the hash-chain version below but covers
+    /// `compress_block_hc_optimal()` with a non-zero `base`.
+    #[test]
+    fn hc_optimal_levels_continue_match_upstream_bytes_with_dictionary() {
+        let dict = patterned_hc_input(256);
+        let mut input = patterned_hc_input(1024);
+        for (i, byte) in input.iter_mut().enumerate() {
+            *byte ^= ((i >> 7) & 1) as u8;
+        }
+        let cases: &[(c_int, &str)] = &[
+            (10, "0f00016dff0b39386063626564676669686b6a6d6c6f6e7131303332353437361a00159e47464043424544474634000f4e00100fd00010144562010f1e014010339c00234544c4000e04010f1e012e011a00144262000e34000fd000330445021f434e001e0fd00014234043c4000f1e013d049c0005a7020fa40342356d6e6fa7030a1a000fd00037144409030f34001550676669686b"),
+            (11, "0f00016dff0b39386063626564676669686b6a6d6c6f6e7131303332353437361a00159e47464043424544474634000f4e00100fd00010144562010f1e014010339c00234544c4000f0401260f1a000c144262000e34000fd000330445021f434e001e0fd00014234043c4000f1e013d049c0005a7020ea4030fee013305a7030a1a000fd00037144409030f34001550676669686b"),
+            (12, "0f00016dff0b39386063626564676669686b6a6d6c6f6e7131303332353437361a00159f474640434245444746340018061a000fd00010144562010f1e014010339c00234544c4000f0401260f1a000c144262000e34000fd000330445021f434e001e0fd00014234043c4000f1e013d049c0005a7020fa40341001a0005a7030a1a000fd00037144409030f34001550676669686b"),
+        ];
+
+        for (level, expected_hex) in cases {
+            let expected = decode_hex(expected_hex);
+            unsafe {
+                let stream = LZ4_createStreamHC();
+                assert!(!stream.is_null());
+                LZ4_resetStreamHC_fast(stream, *level);
+                assert_eq!(
+                    LZ4_loadDictHC(stream, dict.as_ptr() as *const c_char, dict.len() as c_int),
+                    dict.len() as c_int
+                );
+
+                let mut compressed = vec![0u8; LZ4_compressBound(input.len() as c_int) as usize];
+                let compressed_len = LZ4_compress_HC_continue(
+                    stream,
+                    input.as_ptr() as *const c_char,
+                    compressed.as_mut_ptr() as *mut c_char,
+                    input.len() as c_int,
+                    compressed.len() as c_int,
+                );
+                LZ4_freeStreamHC(stream);
+
+                assert_eq!(compressed_len as usize, expected.len(), "level {level}");
+                assert_eq!(
+                    &compressed[..compressed_len as usize],
+                    &expected,
+                    "level {level}"
+                );
+            }
+        }
+    }
+
+    /// Byte-level parity check for `LZ4_compress_HC_continue()` across the
+    /// hash-chain HC levels (3..=9) with a 256-byte loaded dictionary and a
+    /// 1024-byte input. Fixtures were produced by the upstream C library
+    /// using the same `patterned_hc_input()` helper the Rust tests use.
+    #[test]
+    fn hc_hashchain_levels_continue_match_upstream_bytes_with_dictionary() {
+        let dict = patterned_hc_input(256);
+        let mut input = patterned_hc_input(1024);
+        for (i, byte) in input.iter_mut().enumerate() {
+            *byte ^= ((i >> 7) & 1) as u8;
+        }
+        let cases: &[(c_int, &str)] = &[
+            (3, "0f00016dff0b39386063626564676669686b6a6d6c6f6e7131303332353437361a00159e47464043424544474634000f4e00100fd00010144562010fea00070f1a0027009c00234544c4000fb600070f1a002b144262000e34000fd000330445021f434e001e0fd0001403e3012f40431e013d049c0005a7020fb600070f1a002b05a7030a1a000fd000370445021f4734001550676669686b"),
+            (4, "0f00016dff0b39386063626564676669686b6a6d6c6f6e7131303332353437361a00159e47464043424544474634000f4e00100fd00010144562010f1e014010339c00234544c4000e04010f1e012e011a00144262000e34000fd000330445021f434e001e0fd0001403e3012f40431e013d049c0005a7020ed4010fee013305a7030a1a000fd000370445021f4734001550676669686b"),
+            (5, "0f00016dff0b39386063626564676669686b6a6d6c6f6e7131303332353437361a00159e47464043424544474634000f4e00100fd00010144562010f1e014010339c00234544c4000e04010f1e012e011a00144262000e34000fd000330445021f434e001e0fd0001403e3012f40431e013d049c0005a7020ed4010f0c033305a7030a1a000fd000370445021f4734001550676669686b"),
+            (6, "0f00016dff0b39386063626564676669686b6a6d6c6f6e7131303332353437361a00159e47464043424544474634000f4e00100fd00010144562010f1e014010339c00234544c4000e04010f1e012e011a00144262000e34000fd000330445021f434e001e0fd0001403e3012f40431e013d049c0005a7020fa40342356d6e6fa7030a1a000fd000370445021f4734001550676669686b"),
+            (7, "0f00016dff0b39386063626564676669686b6a6d6c6f6e7131303332353437361a00159e47464043424544474634000f4e00100fd00010144562010f1e014010339c00234544c4000e04010f1e012e011a00144262000e34000fd000330445021f434e001e0fd0001403e3012f40431e013d049c0005a7020fa40342356d6e6fa7030a1a000fd000370445021f4734001550676669686b"),
+            (8, "0f00016dff0b39386063626564676669686b6a6d6c6f6e7131303332353437361a00159e47464043424544474634000f4e00100fd00010144562010f1e014010339c00234544c4000e04010f1e012e011a00144262000e34000fd000330445021f434e001e0fd0001403e3012f40431e013d049c0005a7020fa40342356d6e6fa7030a1a000fd000370445021f4734001550676669686b"),
+            (9, "0f00016dff0b39386063626564676669686b6a6d6c6f6e7131303332353437361a00159e47464043424544474634000f4e00100fd00010144562010f1e014010339c00234544c4000e04010f1e012e011a00144262000e34000fd000330445021f434e001e0fd0001403e3012f40431e013d049c0005a7020fa40342356d6e6fa7030a1a000fd000370445021f4734001550676669686b"),
+        ];
+
+        for (level, expected_hex) in cases {
+            let expected = decode_hex(expected_hex);
+            unsafe {
+                let stream = LZ4_createStreamHC();
+                assert!(!stream.is_null());
+                LZ4_resetStreamHC_fast(stream, *level);
                 assert_eq!(
                     LZ4_loadDictHC(stream, dict.as_ptr() as *const c_char, dict.len() as c_int),
                     dict.len() as c_int
