@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Cursor, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
@@ -141,7 +141,7 @@ fn strip_lz4_suffix(input: &Path) -> io::Result<PathBuf> {
     Ok(PathBuf::from(stripped))
 }
 
-fn open_input(path: Option<&Path>) -> io::Result<Box<dyn Read>> {
+fn open_input(path: Option<&Path>) -> io::Result<Box<dyn BufRead>> {
     match path {
         None => Ok(Box::new(BufReader::new(io::stdin()))),
         Some(path) if path == Path::new("-") => Ok(Box::new(BufReader::new(io::stdin()))),
@@ -200,24 +200,16 @@ fn compress(
     writer.flush()
 }
 
-fn decompress_concatenated(reader: &mut dyn Read, writer: &mut dyn Write) -> io::Result<()> {
-    let mut input = Vec::new();
-    reader.read_to_end(&mut input)?;
-    let mut offset = 0usize;
-
-    while offset < input.len() {
-        let cursor = Cursor::new(&input[offset..]);
-        let mut decoder = lz4::Decoder::new(cursor)?;
-        copy_large(&mut decoder, writer)?;
-        let (cursor, result) = decoder.finish();
-        result?;
-        let consumed = cursor.position() as usize;
-        if consumed == 0 {
-            return Err(invalid_input("empty lz4 frame"));
+fn decompress_concatenated(reader: &mut dyn BufRead, writer: &mut dyn Write) -> io::Result<()> {
+    loop {
+        if reader.fill_buf()?.is_empty() {
+            return Ok(());
         }
-        offset += consumed;
+        let mut decoder = lz4::Decoder::new(&mut *reader)?;
+        copy_large(&mut decoder, writer)?;
+        let (_, result) = decoder.finish();
+        result?;
     }
-    Ok(())
 }
 
 fn copy_large(reader: &mut dyn Read, writer: &mut dyn Write) -> io::Result<u64> {

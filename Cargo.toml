@@ -4,6 +4,16 @@ version = "0.1.0"
 edition = "2021"
 license = "BSD-2-Clause"
 description = "Pure Rust LZ4 library with the lz4-rs API."
+readme = "README.md"
+documentation = "https://docs.rs/lz4-pure-rs"
+include = [
+    "/Cargo.toml",
+    "/LICENSE",
+    "/README.md",
+    "/build.rs",
+    "/src/**",
+    "/tools/**",
+]
 
 [lib]
 name = "lz4"

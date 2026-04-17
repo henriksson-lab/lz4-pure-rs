@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKDIR="${LZ4_PURE_PERF_DIR:-/tmp/lz4-pure-perf}"
 RUST_LZ4="$ROOT/target/release/lz4"
 SYSTEM_LZ4="${SYSTEM_LZ4:-lz4}"
+RUNS="${LZ4_PURE_PERF_RUNS:-1}"
+SOURCE_REPEAT_STAMP="$WORKDIR/source-repeat.sha256"
 
 mkdir -p "$WORKDIR"
 
@@ -22,11 +24,14 @@ make_corpus() {
     if [ ! -f "$WORKDIR/zeros64.bin" ]; then
         dd if=/dev/zero of="$WORKDIR/zeros64.bin" bs=1M count=64 status=none
     fi
-    if [ ! -f "$WORKDIR/source-repeat.bin" ]; then
+    local source_hash
+    source_hash="$(sha256sum "$ROOT/src/sys.rs" | awk '{print $1}')"
+    if [ ! -f "$WORKDIR/source-repeat.bin" ] || [ ! -f "$SOURCE_REPEAT_STAMP" ] || [ "$(cat "$SOURCE_REPEAT_STAMP")" != "$source_hash" ]; then
         : > "$WORKDIR/source-repeat.bin"
         for _ in $(seq 1 256); do
             cat "$ROOT/src/sys.rs" >> "$WORKDIR/source-repeat.bin"
         done
+        printf '%s\n' "$source_hash" > "$SOURCE_REPEAT_STAMP"
     fi
     if [ ! -f "$WORKDIR/loglike.bin" ]; then
         : > "$WORKDIR/loglike.bin"
@@ -35,6 +40,39 @@ make_corpus() {
                 "$((i % 60))" "$(((i / 60) % 60))" "$((i % 32))" "$i" >> "$WORKDIR/loglike.bin"
         done
     fi
+    if [ ! -f "$WORKDIR/fasta-like.bin" ]; then
+        : > "$WORKDIR/fasta-like.bin"
+        for i in $(seq 1 250000); do
+            printf '>read_%06d length=160 sample=lz4-pure-rs\n' "$i" >> "$WORKDIR/fasta-like.bin"
+            printf 'ACGTGCAANNNNACGTACGTGGTTAACCGGTTACGTACGTGCAATTAACCGGTTNNNNACGTACGTGCAATTAACCGGTTACGTGCAANNNNACGTACGTGGTTAACCGGTTACGTACGTGCAATTAACCGGTTNNNN\n' >> "$WORKDIR/fasta-like.bin"
+        done
+    fi
+    if [ ! -f "$WORKDIR/dictionary-heavy.bin" ]; then
+        : > "$WORKDIR/dictionary-heavy.bin"
+        for i in $(seq 1 400000); do
+            printf 'customer=%05d region=%02d event=checkout status=ok payload=sku-12345,sku-22222,sku-33333 note=shared-prefix-%04d\n' \
+                "$((i % 10000))" "$((i % 32))" "$((i % 4096))" >> "$WORKDIR/dictionary-heavy.bin"
+        done
+    fi
+    if [ ! -f "$WORKDIR/binary-artifact.bin" ]; then
+        cp "$RUST_LZ4" "$WORKDIR/binary-artifact.bin"
+        find "$ROOT/target/release/deps" -maxdepth 1 -type f \( -name '*.rlib' -o -name '*.so' -o -perm -111 \) \
+            -print -quit | while IFS= read -r artifact; do
+                cat "$artifact" >> "$WORKDIR/binary-artifact.bin"
+            done
+    fi
+    if [ ! -f "$WORKDIR/many-small.tar.bin" ]; then
+        local smalldir="$WORKDIR/many-small-src"
+        rm -rf "$smalldir"
+        mkdir -p "$smalldir"
+        for i in $(seq 1 2000); do
+            printf 'small-file=%04d\ncommon-prefix=lz4-pure-rs\nvalue=%08d\n' "$i" "$((i * 17))" > "$smalldir/file-$i.txt"
+        done
+        tar -C "$smalldir" -cf "$WORKDIR/many-small.tar.bin" .
+    fi
+    if [ ! -f "$WORKDIR/already-compressed.bin" ]; then
+        "$SYSTEM_LZ4" -q -f "$WORKDIR/source-repeat.bin" "$WORKDIR/already-compressed.bin"
+    fi
 }
 
 time_command() {
@@ -42,9 +80,19 @@ time_command() {
     local timefile="$2"
     local stdoutfile="$3"
     shift 3
+    local times=()
     printf '%-34s' "$label"
-    /usr/bin/time -f '%e s' -o "$timefile" "$@" > "$stdoutfile"
-    cat "$timefile"
+    for _ in $(seq 1 "$RUNS"); do
+        /usr/bin/time -f '%e' -o "$timefile" "$@" > "$stdoutfile"
+        times+=("$(cat "$timefile")")
+    done
+    mapfile -t times < <(printf '%s\n' "${times[@]}" | sort -n)
+    local median="${times[$((RUNS / 2))]}"
+    if [ "$RUNS" -eq 1 ]; then
+        printf '%s s\n' "$median"
+    else
+        printf 'median %s s (%s runs, best %s s)\n' "$median" "$RUNS" "${times[0]}"
+    fi
 }
 
 run_one() {
@@ -76,6 +124,20 @@ run_one random64
 run_one zeros64
 run_one source-repeat
 run_one loglike
+run_one fasta-like
+run_one dictionary-heavy
+run_one binary-artifact
+run_one many-small.tar
+run_one already-compressed
+
+echo
+echo "== source-repeat HC level 9 ($(wc -c < "$WORKDIR/source-repeat.bin") bytes) =="
+time_command "rust hc9 compress" "$WORKDIR/source-repeat.rust.hc9.compress.time" /dev/null "$RUST_LZ4" -l 9 -f "$WORKDIR/source-repeat.bin" "$WORKDIR/source-repeat.rust.hc9.lz4"
+time_command "system hc9 compress" "$WORKDIR/source-repeat.system.hc9.compress.time" /dev/null "$SYSTEM_LZ4" -q -9 -f "$WORKDIR/source-repeat.bin" "$WORKDIR/source-repeat.system.hc9.lz4"
+"$SYSTEM_LZ4" -q -t "$WORKDIR/source-repeat.rust.hc9.lz4" >/dev/null
+"$RUST_LZ4" -t "$WORKDIR/source-repeat.system.hc9.lz4" >/dev/null
+printf '%-34s%s bytes\n' "rust hc9 compressed size" "$(wc -c < "$WORKDIR/source-repeat.rust.hc9.lz4")"
+printf '%-34s%s bytes\n' "system hc9 compressed size" "$(wc -c < "$WORKDIR/source-repeat.system.hc9.lz4")"
 
 cat "$WORKDIR/source-repeat.system.lz4" "$WORKDIR/random64.system.lz4" > "$WORKDIR/concat.system.lz4"
 cat "$WORKDIR/source-repeat.bin" "$WORKDIR/random64.bin" > "$WORKDIR/concat.expected"

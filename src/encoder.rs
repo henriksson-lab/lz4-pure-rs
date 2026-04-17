@@ -97,7 +97,7 @@ impl EncoderBuilder {
                 block_size_id: self.block_size.clone(),
                 block_mode: self.block_mode.clone(),
                 content_checksum_flag: self.checksum.clone(),
-                content_size: self.content_size.clone(),
+                content_size: self.content_size,
                 frame_type: FrameType::Frame,
                 dict_id: 0,
                 block_checksum_flag: self.block_checksum.clone(),
@@ -118,6 +118,12 @@ impl EncoderBuilder {
         };
         encoder.write_header(&preferences)?;
         Ok(encoder)
+    }
+}
+
+impl Default for EncoderBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

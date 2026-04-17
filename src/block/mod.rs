@@ -23,20 +23,15 @@ use super::liblz4::*;
 use std::io::{Error, ErrorKind, Result};
 
 /// Represents the compression mode do be used.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum CompressionMode {
     /// High compression with compression parameter
     HIGHCOMPRESSION(i32),
     /// Fast compression with acceleration paramet
     FAST(i32),
     /// Default compression
+    #[default]
     DEFAULT,
-}
-
-impl Default for CompressionMode {
-    fn default() -> Self {
-        CompressionMode::DEFAULT
-    }
 }
 
 /// Returns the size of the buffer that is guaranteed to hold the result of
@@ -46,7 +41,7 @@ pub fn compress_bound(uncompressed_size: usize) -> Result<usize> {
     // 0 iff src too large
     let compress_bound: i32 = unsafe { LZ4_compressBound(uncompressed_size as i32) };
 
-    if uncompressed_size > (i32::max_value() as usize) || compress_bound <= 0 {
+    if uncompressed_size > (i32::MAX as usize) || compress_bound <= 0 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             "Compression input too long.",
@@ -69,7 +64,7 @@ pub fn compress(src: &[u8], mode: Option<CompressionMode>, prepend_size: bool) -
     // 0 iff src too large
     let compress_bound: i32 = unsafe { LZ4_compressBound(src.len() as i32) };
 
-    if src.len() > (i32::max_value() as usize) || compress_bound <= 0 {
+    if src.len() > (i32::MAX as usize) || compress_bound <= 0 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             "Compression input too long.",
@@ -106,7 +101,7 @@ pub fn compress_to_buffer(
     // check that src isn't too big for lz4
     let max_len: i32 = unsafe { LZ4_compressBound(src.len() as i32) };
 
-    if src.len() > (i32::max_value() as usize) || max_len <= 0 {
+    if src.len() > (i32::MAX as usize) || max_len <= 0 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             "Compression input too long.",
@@ -158,7 +153,7 @@ pub fn compress_to_buffer(
         };
     }
     if dec_size <= 0 {
-        return Err(Error::new(ErrorKind::Other, "Compression failed"));
+        return Err(Error::other("Compression failed"));
     }
 
     let written_size = if prepend_size { dec_size + 4 } else { dec_size };

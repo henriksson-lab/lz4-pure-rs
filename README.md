@@ -8,6 +8,36 @@ C `liblz4` library.
 
 Translated from upstream LZ4 commit `9da37b2eebf082bfab6e57c49be71cc41119a40d`.
 
+**still under development**
+
+## Current status
+
+The crate currently implements the `lz4-rs` safe block, encoder, and decoder
+APIs on top of a pure Rust translation. It also exposes the C-shaped `sys`
+surface used by those APIs, including block compression/decompression, streaming
+state APIs, frame APIs, and LZ4HC entry points.
+
+The optional `cli` feature builds a single `lz4` binary using `clap`:
+
+```sh
+cargo run --features cli --bin lz4 -- -f input output.lz4
+cargo run --features cli --bin lz4 -- -d output.lz4 restored
+```
+
+Frame and block output is format-compatible with upstream LZ4 on the tested
+paths. The test suite includes byte fixtures generated from upstream C for fast
+compression, dictionary compression, frame compression, and HC compression, plus
+negative frame tests for malformed headers, checksums, content-size mismatches,
+oversized block headers, linked blocks, and skippable frames.
+
+`tools/lz4_perf_check.sh` compares the release CLI against the installed system
+`lz4` on generated random, zero-filled, source-like, JSON/log-like, FASTA-like,
+dictionary-heavy, binary-artifact, tar/many-small-file, and already-compressed
+samples. As of April 17, 2026, default compressed sizes match system `lz4` for
+that corpus and both implementations validate each other's output. Remaining
+known gaps are mostly performance: source-like default compression and
+random/source-like decompression are still slower than the C CLI, and HC level 9
+frame output remains close but not byte-identical on larger real-world samples.
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code! 
 
