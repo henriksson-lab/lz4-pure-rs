@@ -2570,10 +2570,26 @@ struct HcOptimal {
     litlen: usize,
 }
 
+/// Starting offset added to every physical position before it is stored in
+/// `HcTables::hash` or used for chain arithmetic. Mirrors upstream's
+/// `LZ4HC_init_internal` which pushes `dictLimit` and `lowLimit` to at least
+/// `64 KiB` so the `u16`-delta chain walk can never wrap a valid candidate
+/// below zero: any logical position stored in the hash table is `>= 64 KiB`
+/// and every chain delta is `<= 65535`, so `candidate_log -= delta` stays
+/// positive and the `candidate_log >= lowest_log` exit is exact.
+const HC_OFFSET: u32 = (LZ4_DISTANCE_MAX + 1) as u32;
+
 #[derive(Debug)]
 struct HcTables {
-    hash: Vec<usize>,
-    chain: Vec<usize>,
+    /// Head-of-chain per hash: logical positions (`physical + HC_OFFSET`).
+    /// Initialized to `0` so an empty bucket yields a `candidate_log < HC_OFFSET`
+    /// that fails the `candidate_log >= lowest_log` loop condition without any
+    /// explicit sentinel check.
+    hash: Vec<u32>,
+    /// Delta to the previous chain entry, clamped to `LZ4_DISTANCE_MAX`.
+    /// Initial `0xFFFF` entries mirror upstream's `MEM_INIT(chainTable, 0xFF)`
+    /// so first-ever walks step off the end of the search window immediately.
+    chain: Vec<u16>,
     next_to_update: usize,
     /// Offset inside the search buffer where the current prefix begins.
     /// For no-dict compression this is `0`; when a dictionary is prepended
@@ -2587,16 +2603,27 @@ struct HcTables {
 
 impl HcTables {
     fn with_base(_src_len: usize, base: usize) -> Self {
-        // Upstream allocates `chainTable[LZ4HC_MAXD]` as a fixed-size struct
-        // field that is always non-null. Match that so the hot `find_hc_*`
-        // inner loop doesn't need a per-read empty-chain guard. Also drops
-        // the branch from `table.previous()` on any other access.
         Self {
-            hash: vec![usize::MAX; LZ4HC_HASH_SIZE],
-            chain: vec![usize::MAX; LZ4_DISTANCE_MAX + 1],
+            hash: vec![0u32; LZ4HC_HASH_SIZE],
+            chain: vec![LZ4_DISTANCE_MAX as u16; LZ4_DISTANCE_MAX + 1],
             next_to_update: 0,
             base,
         }
+    }
+
+    /// Convert a physical buffer position to the logical position used for
+    /// storage in `hash` and for chain arithmetic.
+    #[inline(always)]
+    fn to_log(pos: usize) -> u32 {
+        (pos as u32).wrapping_add(HC_OFFSET)
+    }
+
+    /// Convert a logical position back to the physical buffer position. Only
+    /// valid after a `>= lowest_log` check has ensured the logical position
+    /// is at least `HC_OFFSET`.
+    #[inline(always)]
+    fn to_phys(log: u32) -> usize {
+        log.wrapping_sub(HC_OFFSET) as usize
     }
 
     #[inline]
@@ -2605,15 +2632,32 @@ impl HcTables {
         while self.next_to_update < end {
             let pos = self.next_to_update;
             let h = hash4_hc(src, pos);
-            self.chain[pos & LZ4_DISTANCE_MAX] = self.hash[h];
-            self.hash[h] = pos;
+            let log_pos = Self::to_log(pos);
+            let prev_log = self.hash[h];
+            // delta = log_pos - prev_log, clamped to LZ4_DISTANCE_MAX. When
+            // `prev_log` is 0 (empty bucket) the computed delta always exceeds
+            // 65535, so it clamps to the sentinel and a later chain walk
+            // lands below `lowest_log` on the next step.
+            let delta = cmp::min(log_pos - prev_log, HC_OFFSET - 1) as u16;
+            self.chain[pos & LZ4_DISTANCE_MAX] = delta;
+            self.hash[h] = log_pos;
             self.next_to_update += 1;
         }
     }
 
+    /// Returns the physical position stored in the chain before `pos`, or
+    /// `usize::MAX` if the chain step goes below the HC search window (the
+    /// logical delta lands at or below `HC_OFFSET`).
     #[inline]
     fn previous(&self, pos: usize) -> usize {
-        self.chain[pos & LZ4_DISTANCE_MAX]
+        let log_pos = Self::to_log(pos);
+        let delta = self.chain[pos & LZ4_DISTANCE_MAX] as u32;
+        let prev_log = log_pos.wrapping_sub(delta);
+        if prev_log < HC_OFFSET {
+            usize::MAX
+        } else {
+            Self::to_phys(prev_log)
+        }
     }
 }
 
@@ -3521,9 +3565,13 @@ fn find_hc_wider_match(
         };
     }
 
-    let mut candidate = table.hash[hash4_hc(src, ip)];
+    let ip_log = HcTables::to_log(ip);
+    // `ipIndex - LZ4_DISTANCE_MAX`, clamped at `HC_OFFSET`: below `HC_OFFSET`
+    // means "before the start of valid data". Matches upstream's
+    // `max(lowLimit, ipIndex - LZ4_DISTANCE_MAX)`.
+    let lowest_log = cmp::max(HC_OFFSET, ip_log.wrapping_sub(LZ4_DISTANCE_MAX as u32));
+    let mut candidate_log = table.hash[hash4_hc(src, ip)];
     let mut attempts = max_attempts;
-    let lowest = ip.saturating_sub(LZ4_DISTANCE_MAX);
     let mut best = HcMatch {
         start: ip,
         len: longest,
@@ -3538,18 +3586,15 @@ fn find_hc_wider_match(
     let look_back = ip - low_limit;
     let prefix_base = table.base;
     // `HcTables::with_base` always allocates `LZ4_DISTANCE_MAX + 1` entries,
-    // mirroring upstream's fixed-size `chainTable[LZ4HC_MAXD]`. This lets the
-    // inner loop load without an empty-chain guard.
+    // mirroring upstream's fixed-size `chainTable[LZ4HC_MAXD]`.
     let chain_ptr = table.chain.as_ptr();
-
-    // Upstream: `while ((matchIndex >= lowestMatchIndex) && (nbAttempts > 0))`.
-    // We carry an extra `candidate < ip` because we don't use upstream's
-    // `dictLimit += 64 KiB` offset trick that keeps chain deltas from
-    // wrapping candidates past `ip`; this single bound subsumes both the
-    // "no previous" sentinel (the initial `usize::MAX` from an empty hash
-    // bucket) and the wrap case at the end of the chain walk.
-    while candidate < ip && candidate >= lowest && attempts > 0 {
+    // Upstream loop condition is exactly this after the `+64 KiB` offset
+    // trick: `while ((matchIndex >= lowestMatchIndex) && (nbAttempts > 0))`.
+    // The `u16` delta chain + logical positions keep any wrap-around
+    // impossible, so no extra `candidate < ip` or sentinel guards are needed.
+    while candidate_log >= lowest_log && attempts > 0 {
         attempts -= 1;
+        let candidate = HcTables::to_phys(candidate_log);
         let mut match_len = 0usize;
         let early_skip = favor_dec_speed && ip - candidate < 8;
         // Upstream early-exit filter: before the 4-byte pattern compare,
@@ -3584,42 +3629,38 @@ fn find_hc_wider_match(
         }
 
         if chain_swap && match_len == best.len && candidate + best.len <= ip {
-            let mut distance_to_next = 1usize;
+            let mut distance_to_next: u32 = 1;
             let end = best.len.saturating_sub(MINMATCH - 1);
             let mut accel = 1usize << 4;
             let mut pos = 0usize;
             while pos < end {
                 let probe = candidate + pos;
-                let previous = unsafe { *chain_ptr.add(probe & LZ4_DISTANCE_MAX) };
+                // Chain stores deltas directly, mirroring upstream's
+                // `DELTANEXTU16` return value. `0xFFFF` (init sentinel) is
+                // strictly greater than anything useful, but it naturally
+                // caps `distance_to_next`'s growth.
+                let candidate_dist = unsafe { *chain_ptr.add(probe & LZ4_DISTANCE_MAX) } as u32;
                 let step = accel >> 4;
                 accel += 1;
-                if previous != usize::MAX && previous < probe {
-                    let dist = probe - previous;
-                    if dist > distance_to_next {
-                        distance_to_next = dist;
-                        match_chain_pos = pos;
-                        accel = 1usize << 4;
-                    }
+                if candidate_dist > distance_to_next {
+                    distance_to_next = candidate_dist;
+                    match_chain_pos = pos;
+                    accel = 1usize << 4;
                 }
                 pos += step;
             }
             if distance_to_next > 1 {
-                if distance_to_next > candidate {
-                    break;
-                }
-                candidate -= distance_to_next;
+                candidate_log = candidate_log.wrapping_sub(distance_to_next);
                 continue;
             }
         }
 
         let chain_probe = candidate + match_chain_pos;
-        let previous = unsafe { *chain_ptr.add(chain_probe & LZ4_DISTANCE_MAX) };
+        let dist_next_match = unsafe { *chain_ptr.add(chain_probe & LZ4_DISTANCE_MAX) } as u32;
         if pattern_analysis
-            && previous != usize::MAX
-            && candidate > previous
-            && candidate - previous == 1
+            && dist_next_match == 1
             && repeated_pattern
-            && candidate > lowest
+            && candidate_log > lowest_log
             && match_chain_pos == 0
         {
             if src_pattern_len == 0 {
@@ -3638,6 +3679,7 @@ fn find_hc_wider_match(
             let protect_dict_end = prefix_base == 0
                 || match_candidate >= prefix_base
                 || match_candidate + MINMATCH <= prefix_base;
+            let lowest = HcTables::to_phys(lowest_log);
             if protect_dict_end
                 && match_candidate >= lowest
                 && match_candidate + MINMATCH <= src.len()
@@ -3668,7 +3710,7 @@ fn find_hc_wider_match(
                 }
                 if adjusted_to_segment_end {
                     if next_candidate < candidate {
-                        candidate = next_candidate;
+                        candidate_log = HcTables::to_log(next_candidate);
                         continue;
                     }
                 } else if low_limit == ip
@@ -3685,30 +3727,28 @@ fn find_hc_wider_match(
                     }
                     if next_candidate < candidate {
                         let after_pattern = table.previous(next_candidate);
-                        if after_pattern != usize::MAX && after_pattern < next_candidate {
-                            candidate = after_pattern;
-                        } else {
-                            candidate = next_candidate;
-                        }
+                        candidate_log =
+                            if after_pattern != usize::MAX && after_pattern < next_candidate {
+                                HcTables::to_log(after_pattern)
+                            } else {
+                                HcTables::to_log(next_candidate)
+                            };
                         continue;
                     }
                 }
 
                 if next_candidate < candidate {
-                    candidate = next_candidate;
+                    candidate_log = HcTables::to_log(next_candidate);
                     continue;
                 }
             }
         }
 
-        if previous == usize::MAX || previous > chain_probe {
-            break;
-        }
-        let dist = chain_probe - previous;
-        if dist > candidate {
-            break;
-        }
-        candidate -= dist;
+        // `candidate_log -= dist_next_match` can't wrap below `HC_OFFSET`
+        // because `candidate_log >= lowest_log >= HC_OFFSET` (≥ 65536) and
+        // `dist_next_match <= 65535`. If it drops below `lowest_log` the
+        // outer loop condition exits on the next turn.
+        candidate_log = candidate_log.wrapping_sub(dist_next_match);
     }
 
     best
