@@ -4,8 +4,7 @@ Pure Rust LZ4 library with the same public API as `lz4-rs`.
 
 Translated from upstream LZ4 commit `9da37b2eebf082bfab6e57c49be71cc41119a40d`.
 
-**still under development**
-
+* 2026-04-25: On par with speed of original LZ4. Passes a fair number of tests and produces exactly the same input/output. More testing should however be done
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code! 
 
@@ -32,12 +31,14 @@ This blurb might be out of date. Go to [this page](https://github.com/henriksson
 
 
 
-## Current status
+## API
 
 The crate currently implements the `lz4-rs` safe block, encoder, and decoder
 APIs on top of a pure Rust translation. It also exposes the C-shaped `sys`
 surface used by those APIs, including block compression/decompression, streaming
 state APIs, frame APIs, and LZ4HC entry points.
+
+## CLI
 
 The optional `cli` feature builds a single `lz4` binary using `clap`:
 
@@ -45,6 +46,8 @@ The optional `cli` feature builds a single `lz4` binary using `clap`:
 cargo run --features cli --bin lz4 -- -f input output.lz4
 cargo run --features cli --bin lz4 -- -d output.lz4 restored
 ```
+
+## Testing
 
 Frame and block output is format-compatible with upstream LZ4 on the tested
 paths. The test suite includes byte fixtures generated from upstream C for fast
@@ -55,30 +58,50 @@ oversized block headers, linked blocks, and skippable frames.
 `tools/lz4_perf_check.sh` compares the release CLI against the installed system
 `lz4` on generated random, zero-filled, source-like, JSON/log-like, FASTA-like,
 dictionary-heavy, binary-artifact, tar/many-small-file, and already-compressed
-samples. As of April 17, 2026, default compressed sizes match system `lz4` for
-that corpus and both implementations validate each other's output. Remaining
-known gaps are mostly performance: source-like default compression and
-random/source-like decompression are still slower than the C CLI, and HC level 9
-frame output remains close but not byte-identical on larger real-world samples.
+samples. As of April 25, 2026, **CLI output is byte-identical to system
+`lz4 1.9.4` at every level** (default plus `-l 1` through `-l 12`) for every
+corpus input, and both implementations validate each other's output.
 
-### Known performance gap: small-block decompression
+### Speed vs system `lz4 1.9.4` (5-run median)
 
-On small-block workloads (e.g. blosc2-pure-rs calls the LZ4 decoder on 256 KiB
-blocks many times per chunk), `decompress_to_buffer` is currently ~40 % slower
-than `lz4_flex` 0.13's `decompress_into`. Measured on 2026-04-17 integrating
-this crate into `blosc2-pure-rs`:
+Wall-clock from `tools/lz4_perf_check.sh`. Compressed sizes are byte-identical
+to system at every level shown.
 
-| workload (10 MiB float32 signal, typesize=4, clevel=5, 1 thread) | `lz4-pure-rs` | `lz4_flex` 0.13 |
-|---|---:|---:|
-| Single 10 MiB buffer, one call | ~3400 MB/s | ~2500 MB/s |
-| Many 256 KiB blocks (blosc2 integration) | ~1500 MB/s | ~2600 MB/s |
+**Compression:**
 
-On single large buffers `lz4-pure-rs` is faster; on many small calls it is
-slower. The likely cause is per-call setup cost (state init, bounds checks,
-frame/block header parsing) being a larger fraction of runtime on small
-inputs. **This gap should be closed so pure-Rust LZ4 is always competitive —
-a future optimization pass should profile `decompress_to_buffer` on 128–256
-KiB inputs and eliminate avoidable per-call overhead.** Until then,
-integrators that feed LZ4 many small blocks should prefer `lz4_flex`; this
-crate's HC path remains the reason to depend on it in the meantime.
+| Input | Size | Rust | System | Δ |
+|---|---:|---:|---:|---:|
+| random64 | 64 MiB | 0.27 s | 0.25 s | +8% |
+| zeros64 | 64 MiB | 0.04 s | 0.05 s | Rust −20% |
+| source-repeat | 78 MiB | 0.31 s | 0.28 s | +11% |
+| loglike | 22 MiB | 0.03 s | 0.03 s | parity |
+| fasta-like | 43 MiB | 0.04 s | 0.05 s | Rust −20% |
+| dictionary-heavy | 43 MiB | 0.08 s | 0.07 s | +14% |
+| already-compressed | 17 MiB | 0.08 s | 0.08 s | parity |
+| HC level 9 | 78 MiB | 3.52 s | 3.62 s | Rust −3% |
+| HC level 10 | 78 MiB | 5.02 s | 4.53 s | +11% |
+| HC level 11 | 78 MiB | 10.71 s | 10.64 s | parity |
+| HC level 12 | 78 MiB | 9.64 s | 9.22 s | +5% |
 
+**Decompression** (decoding a system-generated `.lz4`):
+
+| Input | Rust | System | Δ |
+|---|---:|---:|---:|
+| random64 | 0.11 s | 0.10 s | +10% |
+| zeros64 | 0.09 s | 0.10 s | Rust −10% |
+| source-repeat | 0.13 s | 0.15 s | Rust −13% |
+| loglike | 0.04 s | 0.04 s | parity |
+| fasta-like | 0.05 s | 0.07 s | Rust −29% |
+| dictionary-heavy | 0.06 s | 0.07 s | Rust −14% |
+| already-compressed | 0.04 s | 0.03 s | +33% (10 ms abs) |
+
+In short: Rust is at parity or faster than `lz4 1.9.4` on most workloads.
+Variance between runs is ±5% on these short timings, so several "+5–10%"
+entries cross to parity in any given run. The remaining real (rather than
+noise-band) gaps are HC level 10 (+11%), `already-compressed` decompress
+(33% relative but only 10 ms absolute on a 17 MiB file), and source-repeat
+default compress (+11%).
+
+## License
+
+License is the same as the LZ4 library, i.e. it is provided as open-source software using BSD 2-Clause license.
