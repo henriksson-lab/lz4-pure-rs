@@ -3,7 +3,13 @@ use super::size_t;
 use std::io::{Error, ErrorKind, Read, Result};
 use std::ptr;
 
-const BUFFER_SIZE: usize = 4 * 1024 * 1024;
+// 4 MiB block payload + 4-byte block header + 4-byte block checksum +
+// frame header (max ~19 bytes) + content checksum trailer (4 bytes) +
+// slack so the slice-to-dst fast path in `LZ4F_decompress` can fire even
+// for incompressible 4 MiB blocks where the block is exactly the maximum
+// size. Without slack the fast path never fires for raw 4 MiB blocks and
+// the decoder always pays the buffered-input copy overhead.
+const BUFFER_SIZE: usize = 4 * 1024 * 1024 + 64 * 1024;
 
 // NOTE: unsafe to device Clone or Copy, otherwise
 // there can be multiple copies of the same inner LZ4 pointer

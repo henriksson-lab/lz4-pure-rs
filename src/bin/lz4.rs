@@ -186,9 +186,16 @@ fn compress(
     level: u32,
     input_size: Option<u64>,
 ) -> io::Result<()> {
+    // Match upstream `lz4` CLI's level→mode mapping: levels 0, 1, 2 are
+    // fast-mode (acceleration variants of `LZ4_compress_fast`), level 3+
+    // is HC. Without this, our CLI's `-l 1`/`-l 2` would route through
+    // HC level 1/2 (LZ4MID) and produce a different .lz4 file than
+    // `lz4 -1`/`lz4 -2`. The library API (`LZ4_compress_HC` at level 1)
+    // is unaffected — this remap only happens at the CLI layer.
+    let effective_level = if level < 3 { 0 } else { level };
     let mut builder = lz4::EncoderBuilder::new();
     builder
-        .level(level)
+        .level(effective_level)
         .block_size(cli_block_size(input_size))
         .block_mode(BlockMode::Independent)
         .block_checksum(BlockChecksum::NoBlockChecksum)

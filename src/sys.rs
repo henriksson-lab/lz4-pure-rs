@@ -1616,23 +1616,45 @@ pub unsafe extern "C" fn LZ4F_decompress(
         if let Err(code) = parse_frame_header_if_available(inner) {
             return code;
         }
-        if let Some(result) = try_decompress_frame_block_to_dst(
-            inner,
-            slice::from_raw_parts_mut(dstBuffer, dst_capacity),
-        ) {
-            match result {
-                Ok(written) => {
-                    let consumed = consumed_from_call(inner.done, src_size, inner.input.len());
-                    *srcSizePtr = consumed;
-                    *dstSizePtr = written;
-                    if inner.done && pending_is_empty(inner) {
-                        *inner = DecompressionCtx::default();
-                        return 0;
-                    }
-                    return frame_hint(inner);
-                }
-                Err(code) => return code,
+        // Drain as many complete blocks from `inner.input` as fit in `dst`
+        // within this single LZ4F_decompress call. Without this loop, each
+        // call processed exactly one block while accumulating leftover input
+        // — so once the slow path ran for any reason (e.g. the first call,
+        // before the header is parsed), `inner.input` was never drained and
+        // the fast slice-to-dst path could not fire on subsequent calls.
+        let dst_slice = slice::from_raw_parts_mut(dstBuffer, dst_capacity);
+        let mut total_written = 0usize;
+        loop {
+            let remaining = &mut dst_slice[total_written..];
+            if remaining.is_empty() {
+                break;
             }
+            match try_decompress_frame_block_to_dst(inner, remaining) {
+                Some(Ok(written)) => {
+                    total_written += written;
+                    if inner.done {
+                        break;
+                    }
+                    // If the most recent call wrote 0 bytes (e.g. final
+                    // block-zero marker followed by trailer) we still made
+                    // progress on inner state — try once more and let the
+                    // function return None on the next call when truly out
+                    // of complete blocks.
+                    continue;
+                }
+                Some(Err(code)) => return code,
+                None => break,
+            }
+        }
+        if total_written > 0 || inner.done {
+            let consumed = consumed_from_call(inner.done, src_size, inner.input.len());
+            *srcSizePtr = consumed;
+            *dstSizePtr = total_written;
+            if inner.done && pending_is_empty(inner) {
+                *inner = DecompressionCtx::default();
+                return 0;
+            }
+            return frame_hint(inner);
         }
     }
 
@@ -2391,16 +2413,22 @@ fn compress_block(src: &[u8], dst: &mut [u8], acceleration: usize) -> Option<usi
     } else {
         LZ4_HASH_BITS
     };
-    let mut table = vec![0usize; 1 << hash_bits];
+    // u32 table entries instead of usize: positions fit u32 (max input is
+    // bounded by `LZ4_MAX_INPUT_SIZE = 0x7E000000 ≈ 2 GiB`), and halving
+    // the per-entry width halves the table's L1 cache footprint. Mirrors
+    // upstream's `byU32`/`byU16` table types.
+    let mut table = vec![0u32; 1 << hash_bits];
     let mut ip = 0usize;
     let mut anchor = 0usize;
     let mut op = 0usize;
     let mflimit_plus_one = src.len() - MFLIMIT + 1;
     let match_limit = src.len() - LAST_LITERALS;
 
-    table[hash_fast(src, ip, by_u16)] = ip;
+    table[hash_fast(src, ip, by_u16)] = ip as u32;
     ip += 1;
     let mut forward_h = hash_fast(src, ip, by_u16);
+
+    let src_ptr = src.as_ptr();
 
     loop {
         let mut forward_ip = ip;
@@ -2419,13 +2447,15 @@ fn compress_block(src: &[u8], dst: &mut [u8], acceleration: usize) -> Option<usi
                 return emit_last_literals(src, dst, anchor, op);
             }
 
-            ref_pos = table[h];
+            ref_pos = table[h] as usize;
             forward_h = hash_fast(src, forward_ip, by_u16);
-            table[h] = ip;
+            table[h] = ip as u32;
 
+            // Mirrors upstream's `LZ4_read32(match) == LZ4_read32(ip)` —
+            // a single 4-byte unaligned compare instead of a slice memcmp.
             if ip > ref_pos
                 && ip - ref_pos <= LZ4_DISTANCE_MAX
-                && src[ref_pos..ref_pos + MINMATCH] == src[ip..ip + MINMATCH]
+                && unsafe { read_u32_ptr(src_ptr.add(ref_pos)) == read_u32_ptr(src_ptr.add(ip)) }
             {
                 break;
             }
@@ -2447,13 +2477,13 @@ fn compress_block(src: &[u8], dst: &mut [u8], acceleration: usize) -> Option<usi
                 return emit_last_literals(src, dst, anchor, op);
             }
 
-            table[hash_fast(src, ip - 2, by_u16)] = ip - 2;
+            table[hash_fast(src, ip - 2, by_u16)] = (ip - 2) as u32;
             let h = hash_fast(src, ip, by_u16);
-            ref_pos = table[h];
-            table[h] = ip;
+            ref_pos = table[h] as usize;
+            table[h] = ip as u32;
             if ip > ref_pos
                 && ip - ref_pos <= LZ4_DISTANCE_MAX
-                && src[ref_pos..ref_pos + MINMATCH] == src[ip..ip + MINMATCH]
+                && unsafe { read_u32_ptr(src_ptr.add(ref_pos)) == read_u32_ptr(src_ptr.add(ip)) }
             {
                 continue;
             }
@@ -2492,14 +2522,15 @@ fn compress_dest_size(src: &[u8], dst: &mut [u8]) -> Option<(usize, usize)> {
     } else {
         LZ4_HASH_BITS
     };
-    let mut table = vec![0usize; 1 << hash_bits];
+    // u32 hash table entries — see compress_block above for rationale.
+    let mut table = vec![0u32; 1 << hash_bits];
     let mut ip = 0usize;
     let mut anchor = 0usize;
     let mut op = 0usize;
     let mflimit_plus_one = src.len() - MFLIMIT + 1;
     let match_limit = src.len() - LAST_LITERALS;
 
-    table[hash_fast(src, ip, by_u16)] = ip;
+    table[hash_fast(src, ip, by_u16)] = ip as u32;
     ip += 1;
     let mut forward_h = hash_fast(src, ip, by_u16);
 
@@ -2520,13 +2551,15 @@ fn compress_dest_size(src: &[u8], dst: &mut [u8]) -> Option<(usize, usize)> {
                 break 'outer;
             }
 
-            ref_pos = table[h];
+            ref_pos = table[h] as usize;
             forward_h = hash_fast(src, forward_ip, by_u16);
-            table[h] = ip;
+            table[h] = ip as u32;
 
             if ip > ref_pos
                 && ip - ref_pos <= LZ4_DISTANCE_MAX
-                && src[ref_pos..ref_pos + MINMATCH] == src[ip..ip + MINMATCH]
+                && unsafe {
+                    read_u32_ptr(src.as_ptr().add(ref_pos)) == read_u32_ptr(src.as_ptr().add(ip))
+                }
             {
                 break;
             }
@@ -2612,13 +2645,15 @@ fn compress_dest_size(src: &[u8], dst: &mut [u8]) -> Option<(usize, usize)> {
                 break 'outer;
             }
 
-            table[hash_fast(src, ip - 2, by_u16)] = ip - 2;
+            table[hash_fast(src, ip - 2, by_u16)] = (ip - 2) as u32;
             let h = hash_fast(src, ip, by_u16);
-            let next_ref = table[h];
-            table[h] = ip;
+            let next_ref = table[h] as usize;
+            table[h] = ip as u32;
             if ip > next_ref
                 && ip - next_ref <= LZ4_DISTANCE_MAX
-                && src[next_ref..next_ref + MINMATCH] == src[ip..ip + MINMATCH]
+                && unsafe {
+                    read_u32_ptr(src.as_ptr().add(next_ref)) == read_u32_ptr(src.as_ptr().add(ip))
+                }
             {
                 ref_pos = next_ref;
                 continue;
@@ -2698,10 +2733,11 @@ fn compress_block_with_dict(
     full.extend_from_slice(dict);
     full.extend_from_slice(src);
     let base = dict.len();
-    let mut table = vec![0usize; 1 << LZ4_HASH_BITS];
+    // u32 hash table entries — see compress_block above for rationale.
+    let mut table = vec![0u32; 1 << LZ4_HASH_BITS];
     let seed_end = full.len().saturating_sub(MINMATCH - 1);
     for pos in 0..cmp::min(base, seed_end) {
-        table[hash_fast(&full, pos, false)] = pos;
+        table[hash_fast(&full, pos, false)] = pos as u32;
     }
 
     let mut ip = base;
@@ -2710,9 +2746,11 @@ fn compress_block_with_dict(
     let mflimit_plus_one = base + src.len() - MFLIMIT + 1;
     let match_limit = base + src.len() - LAST_LITERALS;
 
-    table[hash_fast(&full, ip, false)] = ip;
+    table[hash_fast(&full, ip, false)] = ip as u32;
     ip += 1;
     let mut forward_h = hash_fast(&full, ip, false);
+
+    let full_ptr = full.as_ptr();
 
     loop {
         let mut forward_ip = ip;
@@ -2731,13 +2769,13 @@ fn compress_block_with_dict(
                 return emit_last_literals_with_base(&full, dst, base, anchor, op);
             }
 
-            ref_pos = table[h];
+            ref_pos = table[h] as usize;
             forward_h = hash_fast(&full, forward_ip, false);
-            table[h] = ip;
+            table[h] = ip as u32;
 
             if ip > ref_pos
                 && ip - ref_pos <= LZ4_DISTANCE_MAX
-                && full[ref_pos..ref_pos + MINMATCH] == full[ip..ip + MINMATCH]
+                && unsafe { read_u32_ptr(full_ptr.add(ref_pos)) == read_u32_ptr(full_ptr.add(ip)) }
             {
                 break;
             }
@@ -2759,13 +2797,13 @@ fn compress_block_with_dict(
                 return emit_last_literals_with_base(&full, dst, base, anchor, op);
             }
 
-            table[hash_fast(&full, ip - 2, false)] = ip - 2;
+            table[hash_fast(&full, ip - 2, false)] = (ip - 2) as u32;
             let h = hash_fast(&full, ip, false);
-            ref_pos = table[h];
-            table[h] = ip;
+            ref_pos = table[h] as usize;
+            table[h] = ip as u32;
             if ip > ref_pos
                 && ip - ref_pos <= LZ4_DISTANCE_MAX
-                && full[ref_pos..ref_pos + MINMATCH] == full[ip..ip + MINMATCH]
+                && unsafe { read_u32_ptr(full_ptr.add(ref_pos)) == read_u32_ptr(full_ptr.add(ip)) }
             {
                 continue;
             }
@@ -2785,11 +2823,24 @@ struct HcMatch {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 struct HcOptimal {
-    price: usize,
-    off: usize,
-    mlen: usize,
-    litlen: usize,
+    // u32 instead of usize: `price`, `off`, `mlen`, `litlen` all stay well
+    // under 2^32 (the maximum block size is `LZ4_OPT_NUM = 4096`, distances
+    // are bounded by `LZ4_DISTANCE_MAX = 65535`, and prices are bounded by
+    // a small multiple of `LZ4_OPT_NUM`). Halving the struct from 32 bytes
+    // to 16 bytes cuts the `opt` table from 128 KiB to 64 KiB and is a
+    // meaningful cache-traffic reduction in the inner optimal-parser loop.
+    //
+    // NOTE: Tried shrinking off/mlen/litlen to u16 (12-byte struct) — that
+    // actually slowed HC10/11/12 by 30-40% because the awkward 12-byte
+    // entry layout (5 per 64-byte cache line with 4 bytes of slack)
+    // produces worse codegen and unaligned accesses. 16 bytes (4 entries
+    // per cache line, all u32-aligned) is the sweet spot.
+    price: u32,
+    off: u32,
+    mlen: u32,
+    litlen: u32,
 }
 
 /// Starting offset added to every physical position before it is stored in
@@ -2801,17 +2852,26 @@ struct HcOptimal {
 /// positive and the `candidate_log >= lowest_log` exit is exact.
 const HC_OFFSET: u32 = (LZ4_DISTANCE_MAX + 1) as u32;
 
+/// Size of the chain table — fixed by the LZ4 format. Hoisted to a const
+/// so the array types in `HcTables` can use it directly.
+const HC_CHAIN_SIZE: usize = LZ4_DISTANCE_MAX + 1;
+
 #[derive(Debug)]
 struct HcTables {
     /// Head-of-chain per hash: logical positions (`physical + HC_OFFSET`).
     /// Initialized to `0` so an empty bucket yields a `candidate_log < HC_OFFSET`
     /// that fails the `candidate_log >= lowest_log` loop condition without any
     /// explicit sentinel check.
-    hash: Vec<u32>,
+    ///
+    /// Stored as `Box<[u32; LZ4HC_HASH_SIZE]>` rather than `Vec<u32>` so the
+    /// length is compile-time known and LLVM can DCE per-access bounds
+    /// checks in `insert_until`'s hot loop.
+    hash: Box<[u32; LZ4HC_HASH_SIZE]>,
     /// Delta to the previous chain entry, clamped to `LZ4_DISTANCE_MAX`.
     /// Initial `0xFFFF` entries mirror upstream's `MEM_INIT(chainTable, 0xFF)`
     /// so first-ever walks step off the end of the search window immediately.
-    chain: Vec<u16>,
+    /// Same `Box<[_; N]>` trick as `hash` above.
+    chain: Box<[u16; HC_CHAIN_SIZE]>,
     next_to_update: usize,
     /// Offset inside the search buffer where the current prefix begins.
     /// For no-dict compression this is `0`; when a dictionary is prepended
@@ -2826,8 +2886,14 @@ struct HcTables {
 impl HcTables {
     fn with_base(_src_len: usize, base: usize) -> Self {
         Self {
-            hash: vec![0u32; LZ4HC_HASH_SIZE],
-            chain: vec![LZ4_DISTANCE_MAX as u16; LZ4_DISTANCE_MAX + 1],
+            hash: vec![0u32; LZ4HC_HASH_SIZE]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
+            chain: vec![LZ4_DISTANCE_MAX as u16; HC_CHAIN_SIZE]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
             next_to_update: 0,
             base,
         }
@@ -2973,7 +3039,9 @@ fn compress_block_lz4mid_with_base(full: &[u8], dst: &mut [u8], base: usize) -> 
         table.hash8[h8] = ip;
         if pos8 != usize::MAX
             && ip - pos8 <= LZ4_DISTANCE_MAX
-            && full[pos8..pos8 + MINMATCH] == full[ip..ip + MINMATCH]
+            && unsafe {
+                read_u32_ptr(full.as_ptr().add(pos8)) == read_u32_ptr(full.as_ptr().add(ip))
+            }
         {
             match_len = count_match(full, ip, pos8, match_limit);
             if match_len >= MINMATCH {
@@ -2987,7 +3055,9 @@ fn compress_block_lz4mid_with_base(full: &[u8], dst: &mut [u8], base: usize) -> 
             table.hash4[h4] = ip;
             if pos4 != usize::MAX
                 && ip - pos4 <= LZ4_DISTANCE_MAX
-                && full[pos4..pos4 + MINMATCH] == full[ip..ip + MINMATCH]
+                && unsafe {
+                    read_u32_ptr(full.as_ptr().add(pos4)) == read_u32_ptr(full.as_ptr().add(ip))
+                }
             {
                 match_len = count_match(full, ip, pos4, match_limit);
                 if match_len >= MINMATCH {
@@ -3000,7 +3070,10 @@ fn compress_block_lz4mid_with_base(full: &[u8], dst: &mut [u8], base: usize) -> 
                         let dist2 = ip1.saturating_sub(pos8_next);
                         if pos8_next != usize::MAX
                             && dist2 <= LZ4_DISTANCE_MAX
-                            && full[pos8_next..pos8_next + MINMATCH] == full[ip1..ip1 + MINMATCH]
+                            && unsafe {
+                                read_u32_ptr(full.as_ptr().add(pos8_next))
+                                    == read_u32_ptr(full.as_ptr().add(ip1))
+                            }
                         {
                             let len2 = count_match(full, ip1, pos8_next, match_limit);
                             if len2 > match_len {
@@ -3313,15 +3386,24 @@ fn compress_block_hc_optimal(
         table.insert_until(full, base);
     }
 
-    let mut opt = vec![
+    // Allocate on the heap (Box<[_; N]>) instead of `Vec` so the
+    // compiler knows the length is fixed at `LZ4_OPT_NUM + 3` and can
+    // eliminate per-access bounds checks more aggressively. We keep it on
+    // the heap rather than the stack because the array is 64 KiB
+    // (4099 × 16 B), which is well above what's safe on the default 8 MiB
+    // stack when we're already deep in the encoder call stack.
+    let mut opt: Box<[HcOptimal; LZ4_OPT_NUM + 3]> = vec![
         HcOptimal {
-            price: usize::MAX / 4,
+            price: u32::MAX / 4,
             off: 0,
             mlen: 1,
             litlen: 0,
         };
         LZ4_OPT_NUM + 3
-    ];
+    ]
+    .into_boxed_slice()
+    .try_into()
+    .unwrap();
 
     let mut ip = base;
     let mut anchor = base;
@@ -3329,6 +3411,11 @@ fn compress_block_hc_optimal(
     let iend = full.len();
     let mflimit = iend - MFLIMIT;
     let match_limit = iend - LAST_LITERALS;
+    // High-water mark of the largest opt[] index written by the previous
+    // main-loop iteration. The next iteration only needs to reset the
+    // entries it might read. On the first iteration we conservatively clear
+    // the full table so pre-loop sentinel values are correct everywhere.
+    let mut prev_max_touched: usize = LZ4_OPT_NUM + 2;
 
     while ip <= mflimit {
         let llen = ip - anchor;
@@ -3353,8 +3440,17 @@ fn compress_block_hc_optimal(
             continue;
         }
 
-        opt.fill(HcOptimal {
-            price: usize::MAX / 4,
+        // Reset only the prefix of opt[] that the previous iteration
+        // touched. Profile showed the unconditional 65-KiB
+        // `opt.fill(...)` was burning a huge chunk of HC10 time
+        // (visible as many `movdqu %xmm0` writes in `perf annotate`).
+        // The largest index any iteration writes is `last_match_pos + 3`
+        // (the trailing add_lit loop), so resetting that range plus a
+        // little slack is sufficient for the next iteration's reads to
+        // see the sentinel everywhere they care about.
+        let fill_end = (prev_max_touched + 1).min(LZ4_OPT_NUM + 3);
+        opt[..fill_end].fill(HcOptimal {
+            price: u32::MAX / 4,
             off: 0,
             mlen: 1,
             litlen: 0,
@@ -3365,7 +3461,7 @@ fn compress_block_hc_optimal(
                 price: hc_literals_price(llen + rpos),
                 off: 0,
                 mlen: 1,
-                litlen: llen + rpos,
+                litlen: (llen + rpos) as u32,
             };
         }
 
@@ -3373,9 +3469,9 @@ fn compress_block_hc_optimal(
         for mlen in MINMATCH..=first_len {
             opt[mlen] = HcOptimal {
                 price: hc_sequence_price(llen, mlen),
-                off: first_match.off,
-                mlen,
-                litlen: llen,
+                off: first_match.off as u32,
+                mlen: mlen as u32,
+                litlen: llen as u32,
             };
         }
         let mut last_match_pos = first_len;
@@ -3385,12 +3481,12 @@ fn compress_block_hc_optimal(
                 price: opt[last_match_pos].price + hc_literals_price(add_lit),
                 off: 0,
                 mlen: 1,
-                litlen: add_lit,
+                litlen: add_lit as u32,
             };
         }
 
-        let mut best_mlen = opt[last_match_pos].mlen;
-        let mut best_off = opt[last_match_pos].off;
+        let mut best_mlen = opt[last_match_pos].mlen as usize;
+        let mut best_off = opt[last_match_pos].off as usize;
         let mut cur = 1usize;
         let mut immediate = false;
 
@@ -3439,44 +3535,104 @@ fn compress_block_hc_optimal(
                 break;
             }
 
-            let base_litlen = opt[cur].litlen;
+            let base_litlen = opt[cur].litlen as usize;
+            // Hoist `opt[cur].price` and `hc_literals_price(base_litlen)` out
+            // of the 3-iter literals loop — both are loop-invariant.
+            let lit_anchor_price = opt[cur]
+                .price
+                .saturating_sub(hc_literals_price(base_litlen));
             for litlen in 1..MINMATCH {
                 let pos = cur + litlen;
-                let price = opt[cur]
-                    .price
-                    .saturating_sub(hc_literals_price(base_litlen))
-                    + hc_literals_price(base_litlen + litlen);
+                let price = lit_anchor_price + hc_literals_price(base_litlen + litlen);
                 if price < opt[pos].price {
                     opt[pos] = HcOptimal {
                         price,
                         off: 0,
                         mlen: 1,
-                        litlen: base_litlen + litlen,
+                        litlen: (base_litlen + litlen) as u32,
                     };
                 }
             }
 
             let match_len = new_match.len.min(LZ4_OPT_NUM - cur - 1);
-            for ml in MINMATCH..=match_len {
+            // Hoist the loop-invariant `opt[cur].mlen == 1` decision out of
+            // the ml loop. `base_ll` and `base_price` don't depend on ml, so
+            // computing them once instead of on every inner iteration cuts
+            // both the cache pressure on `opt[cur]` and the cmov/branch
+            // overhead. Mirrors upstream's structure where `ll` and the
+            // prefix lookup are read once before the price loop.
+            let (base_ll, base_price) = if opt[cur].mlen == 1 {
+                let ll = opt[cur].litlen as usize;
+                let prefix = if cur > ll { opt[cur - ll].price } else { 0 };
+                (ll, prefix)
+            } else {
+                (0usize, opt[cur].price)
+            };
+            let new_off_u32 = new_match.off as u32;
+            let base_ll_u32 = base_ll as u32;
+            let dec_speed_adj = u32::from(favor_dec_speed);
+            // Hoist `hc_sequence_price`'s literals-dependent portion out of
+            // the loop. Only the match-length extension term needs to be
+            // recomputed per iteration, and only for `ml >= 19` (the common
+            // short-match case skips this entirely).
+            let base_seq_price = base_price + 3 + hc_literals_price(base_ll);
+            // Split the inner ml loop. `last_match_pos` only changes when
+            // `ml == match_len` in the LAST iteration, so for ml in
+            // MINMATCH..match_len it is invariant — let the compiler see
+            // that by lifting the `last_match_pos + 3` threshold out of the
+            // body and removing the `ml == match_len` branch from the hot
+            // loop entirely.
+            let lmp_thresh = last_match_pos + 3;
+            for ml in MINMATCH..match_len {
                 let pos = cur + ml;
-                let (ll, price) = if opt[cur].mlen == 1 {
-                    let ll = opt[cur].litlen;
-                    let prefix = if cur > ll { opt[cur - ll].price } else { 0 };
-                    (ll, prefix + hc_sequence_price(ll, ml))
+                let mut price = base_seq_price;
+                if ml >= 15 + MINMATCH {
+                    price += 1 + ((ml - (15 + MINMATCH)) / 255) as u32;
+                }
+                // Lift the `opt[pos].price` read out of the unconditional
+                // path. When `pos > lmp_thresh` we always write, so the
+                // existing price doesn't matter — and skipping the read
+                // saves one cache hit per iteration in the typical case
+                // (most ml iters land past the threshold for HC10/11).
+                let do_write = if pos > lmp_thresh {
+                    true
                 } else {
-                    (0, opt[cur].price + hc_sequence_price(0, ml))
+                    let acceptable_price = opt[pos].price.saturating_sub(dec_speed_adj);
+                    price <= acceptable_price
                 };
-
-                let acceptable_price = opt[pos].price.saturating_sub(usize::from(favor_dec_speed));
-                if pos > last_match_pos + 3 || price <= acceptable_price {
-                    if ml == match_len && last_match_pos < pos {
+                if do_write {
+                    opt[pos] = HcOptimal {
+                        price,
+                        off: new_off_u32,
+                        mlen: ml as u32,
+                        litlen: base_ll_u32,
+                    };
+                }
+            }
+            // Handle the final iteration (ml == match_len) which also
+            // potentially updates `last_match_pos`.
+            if match_len >= MINMATCH {
+                let ml = match_len;
+                let pos = cur + ml;
+                let mut price = base_seq_price;
+                if ml >= 15 + MINMATCH {
+                    price += 1 + ((ml - (15 + MINMATCH)) / 255) as u32;
+                }
+                let do_write = if pos > last_match_pos + 3 {
+                    true
+                } else {
+                    let acceptable_price = opt[pos].price.saturating_sub(dec_speed_adj);
+                    price <= acceptable_price
+                };
+                if do_write {
+                    if last_match_pos < pos {
                         last_match_pos = pos;
                     }
                     opt[pos] = HcOptimal {
                         price,
-                        off: new_match.off,
-                        mlen: ml,
-                        litlen: ll,
+                        off: new_off_u32,
+                        mlen: ml as u32,
+                        litlen: base_ll_u32,
                     };
                 }
             }
@@ -3487,21 +3643,21 @@ fn compress_block_hc_optimal(
                     price: opt[last_match_pos].price + hc_literals_price(add_lit),
                     off: 0,
                     mlen: 1,
-                    litlen: add_lit,
+                    litlen: add_lit as u32,
                 };
             }
             cur += 1;
         }
 
         if !immediate {
-            best_mlen = opt[last_match_pos].mlen;
-            best_off = opt[last_match_pos].off;
+            best_mlen = opt[last_match_pos].mlen as usize;
+            best_off = opt[last_match_pos].off as usize;
             cur = last_match_pos.saturating_sub(best_mlen);
         }
 
         let mut candidate_pos = cur;
-        let mut selected_match_length = best_mlen;
-        let mut selected_offset = best_off;
+        let mut selected_match_length = best_mlen as u32;
+        let mut selected_offset = best_off as u32;
         loop {
             let next_match_length = opt[candidate_pos].mlen;
             let next_offset = opt[candidate_pos].off;
@@ -3509,16 +3665,16 @@ fn compress_block_hc_optimal(
             opt[candidate_pos].off = selected_offset;
             selected_match_length = next_match_length;
             selected_offset = next_offset;
-            if next_match_length > candidate_pos {
+            if next_match_length as usize > candidate_pos {
                 break;
             }
-            candidate_pos -= next_match_length;
+            candidate_pos -= next_match_length as usize;
         }
 
         let mut rpos = 0usize;
         while rpos < last_match_pos {
-            let ml = opt[rpos].mlen;
-            let offset = opt[rpos].off;
+            let ml = opt[rpos].mlen as usize;
+            let offset = opt[rpos].off as usize;
             if ml == 1 {
                 ip += 1;
                 rpos += 1;
@@ -3529,6 +3685,10 @@ fn compress_block_hc_optimal(
             ip += ml;
             anchor = ip;
         }
+        // Track how much of opt[] we wrote to so the next iteration's
+        // partial fill knows what to reset. The largest-index write is
+        // the trailing `add_lit` loop at `last_match_pos + 3`.
+        prev_max_touched = last_match_pos + 3;
     }
 
     emit_last_literals_with_base(full, dst, base, anchor, op)
@@ -3589,18 +3749,20 @@ fn hc_target_length(compression_level: c_int) -> usize {
     }
 }
 
-fn hc_literals_price(lit_len: usize) -> usize {
-    let mut price = lit_len;
+#[inline(always)]
+fn hc_literals_price(lit_len: usize) -> u32 {
+    let mut price = lit_len as u32;
     if lit_len >= 15 {
-        price += 1 + ((lit_len - 15) / 255);
+        price += 1 + ((lit_len - 15) / 255) as u32;
     }
     price
 }
 
-fn hc_sequence_price(lit_len: usize, match_len: usize) -> usize {
+#[inline(always)]
+fn hc_sequence_price(lit_len: usize, match_len: usize) -> u32 {
     let mut price = 1 + 2 + hc_literals_price(lit_len);
     if match_len >= 15 + MINMATCH {
-        price += 1 + ((match_len - (15 + MINMATCH)) / 255);
+        price += 1 + ((match_len - (15 + MINMATCH)) / 255) as u32;
     }
     price
 }
@@ -3726,6 +3888,7 @@ fn find_hc_match(
     )
 }
 
+#[inline(always)]
 fn find_hc_longer_match(
     src: &[u8],
     table: &mut HcTables,
@@ -3765,6 +3928,7 @@ fn find_hc_longer_match(
     }
 }
 
+#[inline(always)]
 fn find_hc_wider_match(
     src: &[u8],
     table: &mut HcTables,
@@ -3804,7 +3968,6 @@ fn find_hc_wider_match(
     let mut src_pattern_len = 0usize;
     let mut match_chain_pos = 0usize;
     let src_ptr = src.as_ptr();
-    let src_len = src.len();
     let look_back = ip - low_limit;
     let prefix_base = table.base;
     // `HcTables::with_base` always allocates `LZ4_DISTANCE_MAX + 1` entries,
@@ -3818,35 +3981,39 @@ fn find_hc_wider_match(
         attempts -= 1;
         let candidate = HcTables::to_phys(candidate_log);
         let mut match_len = 0usize;
+        // Combine the two `if !early_skip` blocks into a single guarded
+        // region. With `#[inline(always)]` and `favor_dec_speed=false` (the
+        // common HC10-12 case), the compiler will DCE the entire block
+        // wrapper. Mirrors upstream's structure where the early-exit filter
+        // and the 4-byte pattern compare share one guarded block.
+        //
+        // Bound checks `ref_end < src_len && cand_end < src_len` were
+        // removed earlier — both are guaranteed by the loop preconditions
+        // (`low_limit + best.len ≤ match_limit ≤ src_len - LAST_LITERALS`
+        // and `candidate >= look_back`).
         let early_skip = favor_dec_speed && ip - candidate < 8;
-        // Upstream early-exit filter: before the 4-byte pattern compare,
-        // check 2 bytes at the shifted candidate's end-of-longest to skip
-        // candidates that cannot improve on the current best.len.
-        let mut passes_filter = true;
-        if !early_skip && best.len >= 1 && candidate >= look_back {
-            let ref_end = low_limit + best.len;
-            let cand_end = candidate - look_back + best.len;
-            if ref_end < src_len && cand_end < src_len {
+        if !early_skip {
+            let mut passes_filter = true;
+            if best.len >= 1 && candidate >= look_back {
+                let ref_end = low_limit + best.len;
+                let cand_end = candidate - look_back + best.len;
                 let a = read_u16_ptr(unsafe { src_ptr.add(ref_end - 1) });
                 let b = read_u16_ptr(unsafe { src_ptr.add(cand_end - 1) });
                 passes_filter = a == b;
             }
-        }
-        if !early_skip
-            && passes_filter
-            && read_u32_ptr(unsafe { src_ptr.add(candidate) }) == pattern
-        {
-            let forward =
-                MINMATCH + count_match(src, ip + MINMATCH, candidate + MINMATCH, match_limit);
-            let back = count_back(src, ip, candidate, low_limit);
-            let len = forward + back;
-            match_len = len;
-            if len > best.len {
-                best = HcMatch {
-                    start: ip - back,
-                    len,
-                    off: ip - candidate,
-                };
+            if passes_filter && read_u32_ptr(unsafe { src_ptr.add(candidate) }) == pattern {
+                let forward =
+                    MINMATCH + count_match(src, ip + MINMATCH, candidate + MINMATCH, match_limit);
+                let back = count_back(src, ip, candidate, low_limit);
+                let len = forward + back;
+                match_len = len;
+                if len > best.len {
+                    best = HcMatch {
+                        start: ip - back,
+                        len,
+                        off: ip - candidate,
+                    };
+                }
             }
         }
 
@@ -3976,10 +4143,12 @@ fn find_hc_wider_match(
     best
 }
 
+#[inline(always)]
 fn is_repeated_pattern(pattern: u32) -> bool {
     (pattern & 0xffff) == (pattern >> 16) && (pattern & 0xff) == (pattern >> 24)
 }
 
+#[inline]
 fn count_pattern(src: &[u8], mut pos: usize, limit: usize, pattern: u32) -> usize {
     let byte = pattern as u8;
     let start = pos;
@@ -4022,6 +4191,7 @@ fn reverse_count_pattern(src: &[u8], mut pos: usize, low_limit: usize, pattern: 
     start - pos
 }
 
+#[inline(always)]
 fn count_back(src: &[u8], ip: usize, candidate: usize, low_limit: usize) -> usize {
     let mut back = 0usize;
     let max_back = cmp::min(ip - low_limit, candidate);
@@ -4045,7 +4215,7 @@ fn count_back(src: &[u8], ip: usize, candidate: usize, low_limit: usize) -> usiz
     back
 }
 
-#[inline]
+#[inline(always)]
 fn count_match(src: &[u8], mut ip: usize, mut match_pos: usize, limit: usize) -> usize {
     let start = ip;
     let src_ptr = src.as_ptr();
