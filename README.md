@@ -61,3 +61,24 @@ known gaps are mostly performance: source-like default compression and
 random/source-like decompression are still slower than the C CLI, and HC level 9
 frame output remains close but not byte-identical on larger real-world samples.
 
+### Known performance gap: small-block decompression
+
+On small-block workloads (e.g. blosc2-pure-rs calls the LZ4 decoder on 256 KiB
+blocks many times per chunk), `decompress_to_buffer` is currently ~40 % slower
+than `lz4_flex` 0.13's `decompress_into`. Measured on 2026-04-17 integrating
+this crate into `blosc2-pure-rs`:
+
+| workload (10 MiB float32 signal, typesize=4, clevel=5, 1 thread) | `lz4-pure-rs` | `lz4_flex` 0.13 |
+|---|---:|---:|
+| Single 10 MiB buffer, one call | ~3400 MB/s | ~2500 MB/s |
+| Many 256 KiB blocks (blosc2 integration) | ~1500 MB/s | ~2600 MB/s |
+
+On single large buffers `lz4-pure-rs` is faster; on many small calls it is
+slower. The likely cause is per-call setup cost (state init, bounds checks,
+frame/block header parsing) being a larger fraction of runtime on small
+inputs. **This gap should be closed so pure-Rust LZ4 is always competitive —
+a future optimization pass should profile `decompress_to_buffer` on 128–256
+KiB inputs and eliminate avoidable per-call overhead.** Until then,
+integrators that feed LZ4 many small blocks should prefer `lz4_flex`; this
+crate's HC path remains the reason to depend on it in the meantime.
+

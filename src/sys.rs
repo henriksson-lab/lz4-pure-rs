@@ -244,9 +244,12 @@ struct FramePrefs {
 
 impl Default for FramePrefs {
     fn default() -> Self {
+        // Matches upstream `LZ4F_INIT_FRAMEINFO` (lz4frame.h:186): a NULL
+        // `LZ4F_preferences_t*` and a zero-initialised one both decode to
+        // `LZ4F_blockLinked = 0`, not Independent.
         Self {
             block_size_id: 4,
-            block_independent: true,
+            block_independent: false,
             block_checksum: false,
             content_checksum: false,
             content_size: 0,
@@ -3768,10 +3771,34 @@ fn count_pattern(src: &[u8], mut pos: usize, limit: usize, pattern: u32) -> usiz
 }
 
 fn reverse_count_pattern(src: &[u8], mut pos: usize, low_limit: usize, pattern: u32) -> usize {
-    let byte = pattern as u8;
+    // Mirrors upstream `LZ4HC_reverseCountPattern` (lz4hc.c:884). The pattern
+    // is sampled from a length-1, length-2, or length-4 repeat (per upstream's
+    // contract), so reading 4 bytes at a time is correct for length-4 repeats
+    // (e.g. `0xAABBCCDD`) where a per-byte walk would miss matches that align
+    // on 4-byte boundaries. The byte tail then walks indices 3..0 of the
+    // pattern in turn.
     let start = pos;
-    while pos > low_limit && src[pos - 1] == byte {
+    // Upstream takes `(BYTE*)(&pattern) + 3` then walks down — i.e. the byte
+    // at the highest memory address of the u32, regardless of host endianness.
+    // `to_ne_bytes()` preserves that memory order.
+    let pattern_bytes = pattern.to_ne_bytes();
+    while pos >= low_limit + 4 {
+        let prev = read_u32_ptr(unsafe { src.as_ptr().add(pos - 4) });
+        if prev != pattern {
+            break;
+        }
+        pos -= 4;
+    }
+    let mut tail_idx = 3usize;
+    while pos > low_limit {
+        if src[pos - 1] != pattern_bytes[tail_idx] {
+            break;
+        }
         pos -= 1;
+        if tail_idx == 0 {
+            break;
+        }
+        tail_idx -= 1;
     }
     start - pos
 }
