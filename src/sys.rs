@@ -697,13 +697,33 @@ pub unsafe extern "C" fn LZ4_decompress_safe_usingDict(
     {
         return -1;
     }
+
+    // Mirrors upstream `LZ4_decompress_safe_usingDict` (lz4.c:2715-2727):
+    // dispatch by dict layout to the corresponding specialised decoder.
+    if dictSize == 0 {
+        return LZ4_decompress_safe(source, dest, compressedSize, maxDecompressedSize);
+    }
     let src = slice::from_raw_parts(source as *const u8, compressedSize as usize);
     let dst = slice::from_raw_parts_mut(dest as *mut u8, maxDecompressedSize as usize);
-    let dict = if dictSize > 0 {
-        slice::from_raw_parts(dictStart as *const u8, dictSize as usize)
-    } else {
-        &[]
-    };
+    let dict = slice::from_raw_parts(dictStart as *const u8, dictSize as usize);
+
+    let dict_end = (dictStart as *const u8).add(dictSize as usize);
+    if dict_end == dest as *const u8 {
+        // Contiguous prefix (`dictStart + dictSize == dest`). Upstream
+        // routes to `LZ4_decompress_safe_withPrefix64k` when
+        // `dictSize >= 64 KB - 1` and to `LZ4_decompress_safe_withSmallPrefix`
+        // otherwise; both rely on the prefix bytes lying immediately before
+        // `dest` in memory and read them via implicit pointer arithmetic.
+        // The Rust ext-dict decoder reads the same bytes through an explicit
+        // dict slice, producing byte-equivalent output, so both branches map
+        // to the same call here. (A future pass could specialise these with
+        // unsafe pointer reads from `dst.as_ptr().sub(prefix_size)` if the
+        // benchmark ever shows a measurable gap.)
+        let _is_prefix_64k = dictSize as usize >= 64 * 1024 - 1;
+        return decompress_block_with_dict(src, dst, dict).map_or(-1, |n| n as c_int);
+    }
+
+    // forceExtDict path: dictionary lives in a separate buffer.
     decompress_block_with_dict(src, dst, dict).map_or(-1, |n| n as c_int)
 }
 
@@ -750,13 +770,32 @@ pub unsafe extern "C" fn LZ4_decompress_safe_partial_usingDict(
     {
         return -1;
     }
+
+    // Mirrors upstream `LZ4_decompress_safe_partial_usingDict` (lz4.c:2730-2743).
+    if dictSize == 0 {
+        return LZ4_decompress_safe_partial(
+            source,
+            dest,
+            compressedSize,
+            targetOutputSize,
+            dstCapacity,
+        );
+    }
     let src = slice::from_raw_parts(source as *const u8, compressedSize as usize);
     let dst = slice::from_raw_parts_mut(dest as *mut u8, dstCapacity as usize);
-    let dict = if dictSize > 0 {
-        slice::from_raw_parts(dictStart as *const u8, dictSize as usize)
-    } else {
-        &[]
-    };
+    let dict = slice::from_raw_parts(dictStart as *const u8, dictSize as usize);
+
+    let dict_end = (dictStart as *const u8).add(dictSize as usize);
+    if dict_end == dest as *const u8 {
+        // Contiguous prefix — see `LZ4_decompress_safe_usingDict` for the
+        // rationale on why both upstream prefix specialisations collapse to
+        // the same Rust call.
+        let _is_prefix_64k = dictSize as usize >= 64 * 1024 - 1;
+        return decompress_block_partial_with_dict(src, dst, targetOutputSize as usize, dict)
+            .map_or(-1, |n| n as c_int);
+    }
+
+    // forceExtDict path.
     decompress_block_partial_with_dict(src, dst, targetOutputSize as usize, dict)
         .map_or(-1, |n| n as c_int)
 }
@@ -2427,34 +2466,214 @@ fn compress_block(src: &[u8], dst: &mut [u8], acceleration: usize) -> Option<usi
 }
 
 fn compress_dest_size(src: &[u8], dst: &mut [u8]) -> Option<(usize, usize)> {
-    if src.is_empty() {
-        let written = compress_block(src, dst, 1)?;
-        return Some((0, written));
+    // Single-pass fillOutput compressor, mirroring upstream
+    // `LZ4_compress_generic(..., fillOutput, ...)` (lz4.c:931+). The
+    // previous implementation binary-searched over input prefixes; this
+    // version makes one pass and truncates when the destination fills.
+    if dst.is_empty() {
+        return None;
+    }
+    let acceleration = 1usize;
+    let olimit = dst.len();
+
+    // Tail spaces required by upstream's pre-checks. The "+ MFLIMIT - MINMATCH"
+    // term reserves room so the parser can always fall through to a final
+    // literal run that satisfies LZ4's end-of-block constraint.
+    let tail = MFLIMIT - MINMATCH; // = 8
+    let last_lit = LAST_LITERALS; // = 5
+
+    if src.len() < MFLIMIT + 1 {
+        return Some(emit_truncated_last_literals(src, dst, 0, 0, olimit));
     }
 
-    let mut low = 0usize;
-    let mut high = src.len();
-    let mut best: Option<(usize, usize, Vec<u8>)> = None;
-    while low <= high {
-        let mid = low + (high - low) / 2;
-        let mut candidate = vec![0u8; dst.len()];
-        match compress_block(&src[..mid], &mut candidate, 1) {
-            Some(written) if written <= dst.len() => {
-                best = Some((mid, written, candidate));
-                low = mid + 1;
+    let by_u16 = src.len() < LZ4_64K_LIMIT;
+    let hash_bits = if by_u16 {
+        LZ4_HASH_BITS_U16
+    } else {
+        LZ4_HASH_BITS
+    };
+    let mut table = vec![0usize; 1 << hash_bits];
+    let mut ip = 0usize;
+    let mut anchor = 0usize;
+    let mut op = 0usize;
+    let mflimit_plus_one = src.len() - MFLIMIT + 1;
+    let match_limit = src.len() - LAST_LITERALS;
+
+    table[hash_fast(src, ip, by_u16)] = ip;
+    ip += 1;
+    let mut forward_h = hash_fast(src, ip, by_u16);
+
+    'outer: loop {
+        let mut forward_ip = ip;
+        let mut step = 1usize;
+        let mut search_match_nb = acceleration << 6;
+        let mut ref_pos;
+
+        loop {
+            let h = forward_h;
+            ip = forward_ip;
+            forward_ip += step;
+            step = search_match_nb >> 6;
+            search_match_nb += 1;
+
+            if forward_ip > mflimit_plus_one {
+                break 'outer;
             }
-            _ => {
-                if mid == 0 {
-                    break;
+
+            ref_pos = table[h];
+            forward_h = hash_fast(src, forward_ip, by_u16);
+            table[h] = ip;
+
+            if ip > ref_pos
+                && ip - ref_pos <= LZ4_DISTANCE_MAX
+                && src[ref_pos..ref_pos + MINMATCH] == src[ip..ip + MINMATCH]
+            {
+                break;
+            }
+        }
+
+        while ip > anchor && ref_pos > 0 && src[ip - 1] == src[ref_pos - 1] {
+            ip -= 1;
+            ref_pos -= 1;
+        }
+
+        loop {
+            let lit_len = ip - anchor;
+
+            // Upstream's pre-token fillOutput check (lz4.c:1114-1118):
+            //   op + (litLength+240)/255 + litLength + 2 + 1 + MFLIMIT - MINMATCH > olimit
+            if op + (lit_len + 240) / 255 + lit_len + 2 + 1 + tail > olimit {
+                break 'outer;
+            }
+
+            let token_pos = op;
+            op += 1;
+            if lit_len >= 15 {
+                let mut extra = lit_len - 15;
+                while extra >= 255 {
+                    dst[op] = 255;
+                    op += 1;
+                    extra -= 255;
                 }
-                high = mid - 1;
+                dst[op] = extra as u8;
+                op += 1;
             }
+            dst[op..op + lit_len].copy_from_slice(&src[anchor..ip]);
+            op += lit_len;
+
+            // Upstream's pre-offset fillOutput check (lz4.c:1143-1148): if the
+            // match is too close to the end, rewind the token and bail.
+            if op + 2 + 1 + tail > olimit {
+                op = token_pos;
+                break 'outer;
+            }
+
+            let offset = ip - ref_pos;
+            dst[op..op + 2].copy_from_slice(&(offset as u16).to_le_bytes());
+            op += 2;
+
+            let mut match_code = count_match(src, ip + MINMATCH, ref_pos + MINMATCH, match_limit);
+            ip += match_code + MINMATCH;
+
+            // Upstream's match-code overflow path (lz4.c:1183-1208): in
+            // fillOutput mode, shrink the match instead of bailing. The
+            // formula computes the largest match_code whose length-extension
+            // bytes still fit alongside the reserved last-literals room.
+            if op + (1 + last_lit) + (match_code + 240) / 255 > olimit {
+                let avail = olimit.saturating_sub(op + 1 + last_lit);
+                let new_match_code = 14 + avail.saturating_mul(255);
+                if new_match_code < match_code {
+                    ip -= match_code - new_match_code;
+                    match_code = new_match_code;
+                } else {
+                    // Shouldn't happen given the trigger condition, but stay
+                    // defensive — leave match_code untouched.
+                }
+            }
+
+            let token_lit_bits = (cmp::min(lit_len, 15) as u8) << 4;
+            if match_code >= 15 {
+                dst[token_pos] = token_lit_bits | 0x0F;
+                let mut ml = match_code - 15;
+                while ml >= 255 {
+                    dst[op] = 255;
+                    op += 1;
+                    ml -= 255;
+                }
+                dst[op] = ml as u8;
+                op += 1;
+            } else {
+                dst[token_pos] = token_lit_bits | (match_code as u8);
+            }
+
+            anchor = ip;
+
+            if ip >= mflimit_plus_one {
+                break 'outer;
+            }
+
+            table[hash_fast(src, ip - 2, by_u16)] = ip - 2;
+            let h = hash_fast(src, ip, by_u16);
+            let next_ref = table[h];
+            table[h] = ip;
+            if ip > next_ref
+                && ip - next_ref <= LZ4_DISTANCE_MAX
+                && src[next_ref..next_ref + MINMATCH] == src[ip..ip + MINMATCH]
+            {
+                ref_pos = next_ref;
+                continue;
+            }
+
+            ip += 1;
+            forward_h = hash_fast(src, ip, by_u16);
+            break;
         }
     }
 
-    let (consumed, written, candidate) = best?;
-    dst[..written].copy_from_slice(&candidate[..written]);
-    Some((consumed, written))
+    Some(emit_truncated_last_literals(src, dst, anchor, op, olimit))
+}
+
+fn emit_truncated_last_literals(
+    src: &[u8],
+    dst: &mut [u8],
+    anchor: usize,
+    mut op: usize,
+    olimit: usize,
+) -> (usize, usize) {
+    // Mirrors upstream's `_last_literals` block (lz4.c:1298-1325) under the
+    // fillOutput directive. Returns (consumed, written).
+    let mut last_run = src.len() - anchor;
+    let needed = op + last_run + 1 + (last_run + 255 - 15) / 255;
+    if needed > olimit {
+        // Upstream:
+        //   lastRun  = (size_t)(olimit-op) - 1;
+        //   lastRun -= (lastRun + 256 - RUN_MASK) / 256;
+        let avail = olimit.saturating_sub(op + 1);
+        let extension_bytes = (avail + 256 - 15) / 256;
+        last_run = avail.saturating_sub(extension_bytes);
+    }
+    if op >= olimit {
+        // No room even for a token — return what we have.
+        return (anchor, op);
+    }
+    if last_run >= 15 {
+        dst[op] = 0xF0; // RUN_MASK << ML_BITS
+        op += 1;
+        let mut accum = last_run - 15;
+        while accum >= 255 {
+            dst[op] = 255;
+            op += 1;
+            accum -= 255;
+        }
+        dst[op] = accum as u8;
+        op += 1;
+    } else {
+        dst[op] = (last_run as u8) << 4;
+        op += 1;
+    }
+    dst[op..op + last_run].copy_from_slice(&src[anchor..anchor + last_run]);
+    op += last_run;
+    (anchor + last_run, op)
 }
 
 fn compress_block_with_dict(
@@ -3943,10 +4162,167 @@ fn emit_len(dst: &mut [u8], mut op: usize, len: usize, base: usize) -> Option<us
     Some(op)
 }
 
+// Mirrors upstream `FASTLOOP_SAFE_DISTANCE` (lz4.c:249). The fast decode loop
+// requires this much headroom in both directions so it can wild-copy 32 bytes
+// past the current cursor without checking on every token.
+const FASTLOOP_SAFE_DISTANCE: usize = 64;
+
+/// Wild copy 32 bytes at a time, advancing past `dst_end`. Caller must ensure
+/// the destination buffer has at least 32 bytes of room past `dst_end`, that
+/// `src_ptr..` has at least `dst_end - dst_ptr` bytes, and that source and
+/// destination either don't overlap or have an offset of at least 32.
+///
+/// Mirrors upstream `LZ4_wildCopy32` (lz4.c:518).
+#[inline(always)]
+unsafe fn wild_copy_32(mut dst_ptr: *mut u8, mut src_ptr: *const u8, dst_end: *mut u8) {
+    loop {
+        ptr::copy_nonoverlapping(src_ptr, dst_ptr, 16);
+        ptr::copy_nonoverlapping(src_ptr.add(16), dst_ptr.add(16), 16);
+        dst_ptr = dst_ptr.add(32);
+        src_ptr = src_ptr.add(32);
+        if dst_ptr >= dst_end {
+            break;
+        }
+    }
+}
+
+/// Variable-length read for the fast loop, only ever called with `base == 15`.
+/// Same semantics as `read_len(src, ip, 15)` but lifted up here so the fast
+/// loop can inline aggressively.
+#[inline(always)]
+fn read_len_fast(src: &[u8], ip: &mut usize) -> Option<usize> {
+    let mut total: usize = 15;
+    loop {
+        if *ip >= src.len() {
+            return None;
+        }
+        let b = src[*ip] as usize;
+        *ip += 1;
+        total = total.checked_add(b)?;
+        if b != 255 {
+            return Some(total);
+        }
+    }
+}
+
 #[inline]
 fn decompress_block(src: &[u8], dst: &mut [u8]) -> Option<usize> {
+    let oend = dst.len();
+    let iend = src.len();
+
+    // Tiny outputs skip the fast loop and go straight to the safe loop.
+    if oend < FASTLOOP_SAFE_DISTANCE {
+        return decompress_block_safe(src, dst, 0, 0);
+    }
+
+    let dst_ptr = dst.as_mut_ptr();
+    let src_ptr = src.as_ptr();
     let mut ip = 0usize;
     let mut op = 0usize;
+
+    // Fast loop: while we have ≥ 64 bytes of output headroom and ≥ 17 bytes of
+    // input headroom, we can wild-copy 32 bytes ahead without per-token checks.
+    // Mirrors upstream `LZ4_FAST_DEC_LOOP` (lz4.c:2071+).
+    while op + FASTLOOP_SAFE_DISTANCE <= oend && ip + 17 <= iend {
+        let token = unsafe { *src_ptr.add(ip) } as usize;
+        ip += 1;
+        let lit_len_token = token >> 4;
+
+        // ----- Literals -----
+        let lit_len = if lit_len_token < 15 {
+            // Short literal: blind 16-byte copy. The 17-byte input headroom
+            // and 64-byte output headroom guarantee in-bounds. Up to 14 junk
+            // bytes past the literal end get overwritten by subsequent
+            // literal/match writes.
+            unsafe {
+                ptr::copy_nonoverlapping(src_ptr.add(ip), dst_ptr.add(op), 16);
+            }
+            lit_len_token
+        } else {
+            // Long literal: decode extension, then either wild-copy (if there
+            // is room for a 32-byte overshoot) or do a bounded copy. Either
+            // way we then continue inline with this same token's match part.
+            let lit_len = read_len_fast(src, &mut ip)?;
+            if ip + lit_len + 32 <= iend && op + lit_len + 32 <= oend {
+                unsafe {
+                    wild_copy_32(dst_ptr.add(op), src_ptr.add(ip), dst_ptr.add(op + lit_len));
+                }
+            } else {
+                if ip + lit_len > iend || op + lit_len > oend {
+                    return None;
+                }
+                unsafe {
+                    ptr::copy_nonoverlapping(src_ptr.add(ip), dst_ptr.add(op), lit_len);
+                }
+            }
+            lit_len
+        };
+        ip += lit_len;
+        op += lit_len;
+
+        // End-of-block: the last sequence in a block is literals only.
+        if ip == iend {
+            return Some(op);
+        }
+
+        // ----- Offset -----
+        if ip + 2 > iend {
+            return None;
+        }
+        let offset =
+            unsafe { (*src_ptr.add(ip) as usize) | ((*src_ptr.add(ip + 1) as usize) << 8) };
+        ip += 2;
+        if offset == 0 || offset > op {
+            return None;
+        }
+
+        // ----- Match length -----
+        let match_len = if (token & 0x0F) == 15 {
+            read_len_fast(src, &mut ip)? + MINMATCH
+        } else {
+            (token & 0x0F) + MINMATCH
+        };
+
+        // ----- Match copy -----
+        if op + match_len + 32 > oend {
+            // Match lands in the tail — use the bounded helper. After this
+            // we may or may not still be in fast-loop range; the loop
+            // condition decides on the next iteration.
+            copy_match_no_dict(dst, &mut op, offset, match_len)?;
+            continue;
+        }
+
+        unsafe {
+            let match_src = dst_ptr.add(op - offset);
+            if offset >= 16 {
+                // Non-overlapping (or far-enough): wild-copy 32-at-a-time.
+                wild_copy_32(dst_ptr.add(op), match_src, dst_ptr.add(op + match_len));
+                op += match_len;
+            } else if offset >= 8 && match_len <= 18 {
+                // Common short match: 8 + 8 + 2 = 18 unconditional bytes.
+                // Mirrors upstream's fastpath at lz4.c:2150-2152.
+                ptr::copy_nonoverlapping(match_src, dst_ptr.add(op), 8);
+                ptr::copy_nonoverlapping(match_src.add(8), dst_ptr.add(op + 8), 8);
+                ptr::copy_nonoverlapping(match_src.add(16), dst_ptr.add(op + 16), 2);
+                op += match_len;
+            } else {
+                // Overlapping or short-with-small-offset match — drop to the
+                // tested doubling-copy helper.
+                copy_match_no_dict(dst, &mut op, offset, match_len)?;
+            }
+        }
+    }
+
+    decompress_block_safe(src, dst, ip, op)
+}
+
+#[inline]
+fn decompress_block_safe(
+    src: &[u8],
+    dst: &mut [u8],
+    mut ip: usize,
+    mut op: usize,
+) -> Option<usize> {
     while ip < src.len() {
         let token = src[ip];
         ip += 1;
