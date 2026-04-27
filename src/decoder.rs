@@ -172,7 +172,7 @@ mod test {
             if self.rng.next_u32() & 0x03 == 0 {
                 self.r.read(buf)
             } else {
-                Err(Error::new(ErrorKind::Other, "Opss..."))
+                Err(Error::other("Opss..."))
             }
         }
     }
@@ -208,7 +208,7 @@ mod test {
     fn finish_encode<W: Write>(encoder: Encoder<W>) -> W {
         let (mut buffer, result) = encoder.finish();
         result.unwrap();
-        buffer.write(&END_MARK).unwrap();
+        buffer.write_all(&END_MARK).unwrap();
         buffer
     }
 
@@ -218,7 +218,7 @@ mod test {
 
         let mut mark = Vec::new();
         let mut data = Vec::new();
-        mark.write(&END_MARK).unwrap();
+        mark.write_all(&END_MARK).unwrap();
         RetryWrapper::new(buffer).read_to_end(&mut data).unwrap();
         assert_eq!(mark, data);
     }
@@ -240,7 +240,7 @@ mod test {
     fn test_decoder_smallest() {
         let expected: Vec<u8> = Vec::new();
         let mut buffer = b"\x04\x22\x4d\x18\x40\x40\xc0\x00\x00\x00\x00".to_vec();
-        buffer.write(&END_MARK).unwrap();
+        buffer.write_all(&END_MARK).unwrap();
 
         let mut decoder = Decoder::new(Cursor::new(buffer)).unwrap();
         let mut actual = Vec::new();
@@ -254,9 +254,9 @@ mod test {
     fn test_decoder_smoke() {
         let mut encoder = EncoderBuilder::new().level(1).build(Vec::new()).unwrap();
         let mut expected = Vec::new();
-        expected.write(b"Some data").unwrap();
-        encoder.write(&expected[..4]).unwrap();
-        encoder.write(&expected[4..]).unwrap();
+        expected.write_all(b"Some data").unwrap();
+        encoder.write_all(&expected[..4]).unwrap();
+        encoder.write_all(&expected[4..]).unwrap();
         let buffer = finish_encode(encoder);
 
         let mut decoder = Decoder::new(Cursor::new(buffer)).unwrap();
@@ -272,7 +272,7 @@ mod test {
         let mut rnd = random();
         let expected = random_stream(&mut rnd, 1027 * 1023 * 7);
         let mut encoder = EncoderBuilder::new().level(1).build(Vec::new()).unwrap();
-        encoder.write(&expected).unwrap();
+        encoder.write_all(&expected).unwrap();
         let encoded = finish_encode(encoder);
 
         let mut decoder = Decoder::new(Cursor::new(encoded)).unwrap();
@@ -283,7 +283,7 @@ mod test {
             if size == 0 {
                 break;
             }
-            actual.write(&buffer[0..size]).unwrap();
+            actual.write_all(&buffer[0..size]).unwrap();
         }
         assert_eq!(expected, actual);
         finish_decode(decoder);
@@ -294,7 +294,7 @@ mod test {
         let mut rnd = random();
         let expected = random_stream(&mut rnd, 1027 * 1023 * 7);
         let mut encoder = EncoderBuilder::new().level(1).build(Vec::new()).unwrap();
-        encoder.write(&expected).unwrap();
+        encoder.write_all(&expected).unwrap();
         let encoded = finish_encode(encoder);
 
         let mut decoder =
@@ -302,14 +302,11 @@ mod test {
         let mut actual = Vec::new();
         loop {
             let mut buffer = [0; BUFFER_SIZE];
-            match decoder.read(&mut buffer) {
-                Ok(size) => {
-                    if size == 0 {
-                        break;
-                    }
-                    actual.write(&buffer[0..size]).unwrap();
+            if let Ok(size) = decoder.read(&mut buffer) {
+                if size == 0 {
+                    break;
                 }
-                Err(_) => {}
+                actual.write_all(&buffer[0..size]).unwrap();
             }
         }
 
@@ -325,7 +322,7 @@ mod test {
         let mut enc = crate::EncoderBuilder::new().build(Vec::new()).unwrap();
 
         // write 'a' 100 times to the encoder
-        let text: Vec<u8> = vec!['a' as u8; 100];
+        let text: Vec<u8> = vec![b'a'; 100];
         enc.write_all(&text[..]).unwrap();
 
         // flush the encoder

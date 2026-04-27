@@ -3,8 +3,9 @@ name = "lz4-pure-rs"
 version = "0.1.0"
 edition = "2021"
 license = "BSD-2-Clause"
-description = "Pure Rust LZ4 library with the lz4-rs API."
+description = "Pure Rust LZ4 library"
 readme = "README.md"
+repository = "https://github.com/henriksson-lab/lz4-pure-rs"
 documentation = "https://docs.rs/lz4-pure-rs"
 include = [
     "/Cargo.toml",
@@ -12,6 +13,7 @@ include = [
     "/README.md",
     "/build.rs",
     "/src/**",
+    "/tests/**",
     "/tools/**",
 ]
 

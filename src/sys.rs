@@ -6627,11 +6627,11 @@ mod tests {
             );
             assert_eq!(LZ4F_isError(update), 0);
             let first_header = u32::from_le_bytes(encoded[pos..pos + 4].try_into().unwrap());
-            assert_eq!(first_header, 0x8000_0000 | 64 * 1024);
+            assert_eq!(first_header, 0x8000_0000 | (64 * 1024));
             let second_pos = pos + 4 + 64 * 1024 + 4;
             let second_header =
                 u32::from_le_bytes(encoded[second_pos..second_pos + 4].try_into().unwrap());
-            assert_eq!(second_header, 0x8000_0000 | 64 * 1024);
+            assert_eq!(second_header, 0x8000_0000 | (64 * 1024));
             pos += update;
             pos += LZ4F_compressEnd(
                 cctx,

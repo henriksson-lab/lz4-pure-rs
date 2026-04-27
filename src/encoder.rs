@@ -269,8 +269,8 @@ mod test {
     #[test]
     fn test_encoder_smoke() {
         let mut encoder = EncoderBuilder::new().level(1).build(Vec::new()).unwrap();
-        encoder.write(b"Some ").unwrap();
-        encoder.write(b"data").unwrap();
+        encoder.write_all(b"Some ").unwrap();
+        encoder.write_all(b"data").unwrap();
         let (_, result) = encoder.finish();
         result.unwrap();
     }
@@ -282,9 +282,9 @@ mod test {
         let mut rnd: u32 = 42;
         for _ in 0..1024 * 1024 {
             input.push((rnd & 0xFF) as u8);
-            rnd = ((1664525 as u64) * (rnd as u64) + (1013904223 as u64)) as u32;
+            rnd = (1664525_u64 * (rnd as u64) + 1013904223_u64) as u32;
         }
-        encoder.write(&input).unwrap();
+        encoder.write_all(&input).unwrap();
         let (compressed, result) = encoder.finish();
         result.unwrap();
 
@@ -305,9 +305,9 @@ mod test {
         let mut rnd: u32 = 42;
         for _ in 0..1024 * 1024 {
             input.push((rnd & 0xFF) as u8);
-            rnd = ((1664525 as u64) * (rnd as u64) + (1013904223 as u64)) as u32;
+            rnd = (1664525_u64 * (rnd as u64) + 1013904223_u64) as u32;
         }
-        encoder.write(&input).unwrap();
+        encoder.write_all(&input).unwrap();
         let (compressed, result) = encoder.finish();
         result.unwrap();
 
@@ -335,9 +335,9 @@ mod test {
         let mut rnd: u32 = 42;
         for _ in 0..1024 * 1024 {
             input.push((rnd & 0xFF) as u8);
-            rnd = ((1664525 as u64) * (rnd as u64) + (1013904223 as u64)) as u32;
+            rnd = (1664525_u64 * (rnd as u64) + 1013904223_u64) as u32;
         }
-        encoder.write(&input).unwrap();
+        encoder.write_all(&input).unwrap();
         let (compressed, result) = encoder.finish();
         result.unwrap();
 
