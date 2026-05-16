@@ -1,3 +1,17 @@
+//! `Write`-based streaming encoder wrapping the LZ4 frame API
+//! (`LZ4F_compressBegin` / `LZ4F_compressUpdate` / `LZ4F_compressEnd`).
+//!
+//! [`Encoder`] consumes an inner [`Write`] sink and emits a complete `.lz4`
+//! frame: a frame header (written eagerly on `build`), a sequence of
+//! compressed blocks (flushed as the input fills the block-size buffer or on
+//! explicit [`flush`](Encoder::flush)), and a frame footer (written by
+//! [`finish`](Encoder::finish)). [`EncoderBuilder`] configures the frame
+//! preferences (block size, block mode, checksums, compression level, etc.)
+//! before constructing the encoder.
+//!
+//! The API mirrors the `lz4-rs` crate's [`Encoder`] / [`EncoderBuilder`] so
+//! that this crate is a drop-in replacement.
+
 use super::liblz4::*;
 use super::size_t;
 use std::cmp;
@@ -5,11 +19,18 @@ use std::io::Result;
 use std::io::Write;
 use std::ptr;
 
+/// RAII wrapper around an `LZ4F_cctx*` that frees the context on drop.
 #[derive(Debug)]
 struct EncoderContext {
     c: LZ4FCompressionContext,
 }
 
+/// Builder for [`Encoder`] that collects LZ4 frame preferences before
+/// constructing the streaming encoder.
+///
+/// Preferences correspond to the fields of upstream `LZ4F_preferences_t`
+/// (see `lz4frame.h`). Defaults match the `lz4-rs` crate, not the upstream
+/// `lz4` CLI; for CLI-compatible defaults see `src/bin/lz4.rs`.
 #[derive(Clone, Debug)]
 pub struct EncoderBuilder {
     block_size: BlockSize,
@@ -25,6 +46,13 @@ pub struct EncoderBuilder {
     content_size: u64,
 }
 
+/// Streaming LZ4 frame encoder wrapping an inner [`Write`] sink.
+///
+/// Bytes written to the encoder are buffered up to the configured block
+/// size and then handed to `LZ4F_compressUpdate`, which emits compressed
+/// blocks into `w`. Always call [`finish`](Encoder::finish) to flush the
+/// final block and write the frame footer — dropping the encoder without
+/// calling `finish` produces a truncated frame.
 #[derive(Debug)]
 pub struct Encoder<W> {
     c: EncoderContext,
@@ -35,6 +63,9 @@ pub struct Encoder<W> {
 }
 
 impl EncoderBuilder {
+    /// Returns a builder pre-populated with the same defaults used by the
+    /// `lz4-rs` crate (linked blocks, content + block checksums enabled,
+    /// fast-mode compression).
     pub fn new() -> Self {
         EncoderBuilder {
             block_size: BlockSize::Default,
@@ -48,31 +79,47 @@ impl EncoderBuilder {
         }
     }
 
+    /// Selects the maximum block size (64 KiB, 256 KiB, 1 MiB, or 4 MiB).
+    /// Larger blocks generally improve compression ratio at the cost of
+    /// memory.
     pub fn block_size(&mut self, block_size: BlockSize) -> &mut Self {
         self.block_size = block_size;
         self
     }
 
+    /// Sets whether blocks may reference data from previous blocks
+    /// ([`BlockMode::Linked`]) or must each compress independently
+    /// ([`BlockMode::Independent`]).
     pub fn block_mode(&mut self, block_mode: BlockMode) -> &mut Self {
         self.block_mode = block_mode;
         self
     }
 
+    /// Enables or disables the per-block xxHash32 trailer that follows each
+    /// compressed block.
     pub fn block_checksum(&mut self, block_checksum: BlockChecksum) -> &mut Self {
         self.block_checksum = block_checksum;
         self
     }
 
+    /// Enables or disables the xxHash32 checksum of the full decompressed
+    /// content that is appended to the frame footer.
     pub fn checksum(&mut self, checksum: ContentChecksum) -> &mut Self {
         self.checksum = checksum;
         self
     }
 
+    /// Sets the compression level. `0` selects fast mode; levels `3..=12`
+    /// route through HC. Levels above 12 are clamped by the underlying
+    /// implementation.
     pub fn level(&mut self, level: u32) -> &mut Self {
         self.level = level;
         self
     }
 
+    /// When `true`, every [`Encoder::write`] call is flushed to the inner
+    /// writer instead of being buffered, reducing internal memory usage at
+    /// some cost in compression ratio for small writes.
     pub fn auto_flush(&mut self, auto_flush: bool) -> &mut Self {
         self.auto_flush = auto_flush;
         self
@@ -85,11 +132,16 @@ impl EncoderBuilder {
         self
     }
 
+    /// Records the total uncompressed content size in the frame header.
+    /// Use `0` (the default) when the size is unknown ahead of time.
     pub fn content_size(&mut self, content_size: u64) -> &mut Self {
         self.content_size = content_size;
         self
     }
 
+    /// Consumes the builder, allocates an LZ4 frame compression context,
+    /// writes the frame header into `w`, and returns the resulting
+    /// streaming encoder.
     pub fn build<W: Write>(&self, w: W) -> Result<Encoder<W>> {
         let block_size = self.block_size.get_size();
         let preferences = LZ4FPreferences {
@@ -194,9 +246,13 @@ impl<W: Write> Encoder<W> {
         self.w.write_all(&self.buffer)
     }
 
-    /// This function is used to flag that this session of compression is done
-    /// with. The stream is finished up (final bytes are written), and then the
-    /// wrapped writer is returned.
+    /// Finalises the LZ4 frame.
+    ///
+    /// Flushes any buffered input, invokes `LZ4F_compressEnd` to write the
+    /// frame footer (and content checksum if enabled), and returns the
+    /// wrapped writer together with the result of writing those final
+    /// bytes. Always call this; dropping the encoder without `finish`
+    /// produces a truncated, undecodable frame.
     pub fn finish(mut self) -> (W, Result<()>) {
         let result = self.write_end();
         (self.w, result)

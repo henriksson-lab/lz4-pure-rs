@@ -338,16 +338,27 @@ impl Default for DecompressionCtx {
     }
 }
 
+/// Library version number; useful to check dll version. Requires v1.3.0+.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_versionNumber() -> c_int {
     LZ4_VERSION_NUMBER
 }
 
+/// Library version string; useful to check dll version. Requires v1.7.5+.
 #[no_mangle]
 pub extern "C" fn LZ4_versionString() -> *const c_char {
     LZ4_VERSION_STRING_BYTES.as_ptr() as *const c_char
 }
 
+/// `LZ4_compressBound()` :
+/// Provides the maximum size that LZ4 compression may output in a "worst case" scenario
+/// (input data not compressible). This function is primarily useful for memory allocation
+/// purposes (destination buffer size). Note that `LZ4_compress_default()` compresses faster
+/// when `dstCapacity` is `>= LZ4_compressBound(srcSize)`.
+///
+/// - `inputSize` : max supported value is `LZ4_MAX_INPUT_SIZE`
+/// - return : maximum output size in a "worst case" scenario,
+///   or 0 if input size is incorrect (too large or negative)
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compressBound(size: c_int) -> c_int {
     if !(0..=LZ4_MAX_INPUT_SIZE).contains(&size) {
@@ -357,6 +368,20 @@ pub unsafe extern "C" fn LZ4_compressBound(size: c_int) -> c_int {
     }
 }
 
+/// `LZ4_compress_default()` :
+/// Compresses `srcSize` bytes from buffer `src` into already-allocated `dst` buffer of size
+/// `dstCapacity`. Compression is guaranteed to succeed if `dstCapacity >= LZ4_compressBound(srcSize)`.
+/// It also runs faster, so it's a recommended setting.
+/// If the function cannot compress `src` into a more limited `dst` budget, compression stops
+/// *immediately*, and the function result is zero. In which case, `dst` content is undefined (invalid).
+///
+/// - `srcSize` : max supported value is `LZ4_MAX_INPUT_SIZE`.
+/// - `dstCapacity` : size of buffer `dst` (which must be already allocated).
+/// - return : the number of bytes written into buffer `dst` (necessarily `<= dstCapacity`)
+///   or 0 if compression fails.
+///
+/// Note : This function is protected against buffer overflow scenarios
+/// (never writes outside `dst` buffer, nor reads outside `source` buffer).
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_default(
     source: *const c_char,
@@ -367,6 +392,7 @@ pub unsafe extern "C" fn LZ4_compress_default(
     LZ4_compress_fast(source, dest, sourceSize, maxDestSize, 1)
 }
 
+/// Obsolete compression function (since v1.7.3). Use `LZ4_compress_default()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress(
     source: *const c_char,
@@ -376,6 +402,7 @@ pub unsafe extern "C" fn LZ4_compress(
     LZ4_compress_default(source, dest, sourceSize, LZ4_compressBound(sourceSize))
 }
 
+/// Obsolete compression function (since v1.7.3). Use `LZ4_compress_default()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_limitedOutput(
     source: *const c_char,
@@ -386,6 +413,7 @@ pub unsafe extern "C" fn LZ4_compress_limitedOutput(
     LZ4_compress_default(source, dest, sourceSize, maxOutputSize)
 }
 
+/// Obsolete compression function (since v1.7.3). Use `LZ4_compress_fast_extState()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_withState(
     state: *mut c_void,
@@ -403,6 +431,7 @@ pub unsafe extern "C" fn LZ4_compress_withState(
     )
 }
 
+/// Obsolete compression function (since v1.7.3). Use `LZ4_compress_fast_extState()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_limitedOutput_withState(
     state: *mut c_void,
@@ -414,6 +443,14 @@ pub unsafe extern "C" fn LZ4_compress_limitedOutput_withState(
     LZ4_compress_fast_extState(state, source, dest, inputSize, maxOutputSize, 1)
 }
 
+/// `LZ4_compress_fast()` :
+/// Same as `LZ4_compress_default()`, but allows selection of "acceleration" factor.
+/// The larger the acceleration value, the faster the algorithm, but also the lesser the
+/// compression. It's a trade-off. It can be fine tuned, with each successive value providing
+/// roughly +~3% to speed. An acceleration value of "1" is the same as regular
+/// `LZ4_compress_default()`. Values `<= 0` will be replaced by `LZ4_ACCELERATION_DEFAULT`
+/// (currently == 1). Values `> LZ4_ACCELERATION_MAX` will be replaced by `LZ4_ACCELERATION_MAX`
+/// (currently == 65537).
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_fast(
     source: *const c_char,
@@ -430,11 +467,18 @@ pub unsafe extern "C" fn LZ4_compress_fast(
     compress_block(src, dst, normalize_acceleration(acceleration)).map_or(0, |n| n as c_int)
 }
 
+/// Returns the size in bytes required for an `LZ4_compress_fast_extState()` state buffer.
+/// Allocate on 8-byte boundaries (a normal `malloc()` is sufficient).
 #[no_mangle]
 pub extern "C" fn LZ4_sizeofState() -> c_int {
     ((1usize << (LZ4_HASH_BITS + 2)) + 32) as c_int
 }
 
+/// `LZ4_compress_fast_extState()` :
+/// Same as `LZ4_compress_fast()`, using an externally allocated memory space for its state.
+/// Use `LZ4_sizeofState()` to know how much memory must be allocated, and allocate it on
+/// 8-byte boundaries (using `malloc()` typically). Then, provide this buffer as `state` to
+/// the compression function.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_fast_extState(
     state: *mut c_void,
@@ -450,6 +494,15 @@ pub unsafe extern "C" fn LZ4_compress_fast_extState(
     LZ4_compress_fast(source, dest, sourceSize, maxDestSize, acceleration)
 }
 
+/// `LZ4_compress_fast_extState_fastReset()` :
+/// A variant of `LZ4_compress_fast_extState()`.
+///
+/// Using this variant avoids an expensive initialization step. It is only safe to call if
+/// the state buffer is known to be correctly initialized already (see `LZ4_resetStream_fast()`
+/// for a definition of "correctly initialized"). From a high level, the difference is that
+/// this function initializes the provided state with a call to something like
+/// `LZ4_resetStream_fast()` while `LZ4_compress_fast_extState()` starts with a call to
+/// `LZ4_resetStream()`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_fast_extState_fastReset(
     state: *mut c_void,
@@ -462,6 +515,23 @@ pub unsafe extern "C" fn LZ4_compress_fast_extState_fastReset(
     LZ4_compress_fast_extState(state, source, dest, sourceSize, maxDestSize, acceleration)
 }
 
+/// `LZ4_compress_destSize()` :
+/// Reverse the logic: compresses as much data as possible from `src` buffer into already
+/// allocated buffer `dst`, of size `>= dstCapacity`. This function either compresses the
+/// entire `src` content into `dst` if it's large enough, or fills `dst` buffer completely
+/// with as much data as possible from `src`. Note: acceleration parameter is fixed to "default".
+///
+/// - `*srcSizePtr` : in+out parameter. Initially contains size of input. Will be modified to
+///   indicate how many bytes were read from `src` to fill `dst`. New value is
+///   necessarily `<=` input value.
+/// - return : Nb bytes written into `dst` (necessarily `<= dstCapacity`) or 0 if compression
+///   fails.
+///
+/// Note : `targetDstSize` must be `>= 1`, because it's the smallest valid lz4 payload.
+///
+/// Note 2 : from v1.8.2 to v1.9.1, this function had a bug (fixed in v1.9.2+): the produced
+///          compressed content could, in rare circumstances, require to be decompressed into
+///          a destination buffer larger by at least 1 byte than `decompressedSize`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_destSize(
     src: *const c_char,
@@ -486,6 +556,9 @@ pub unsafe extern "C" fn LZ4_compress_destSize(
     written as c_int
 }
 
+/// `LZ4_compress_destSize_extState()` : introduced in v1.10.0.
+/// Same as `LZ4_compress_destSize()`, but using an externally allocated state. Also exposes
+/// `acceleration`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_destSize_extState(
     _state: *mut c_void,
@@ -498,6 +571,14 @@ pub unsafe extern "C" fn LZ4_compress_destSize_extState(
     LZ4_compress_destSize(src, dst, srcSizePtr, targetDstSize)
 }
 
+/// `LZ4_compress_HC()` :
+/// Compress data from `src` into `dst`, using the powerful but slower "HC" algorithm.
+/// `dst` must be already allocated. Compression is guaranteed to succeed if
+/// `dstCapacity >= LZ4_compressBound(srcSize)`. Max supported `srcSize` value is
+/// `LZ4_MAX_INPUT_SIZE`. `compressionLevel` : any value between 1 and `LZ4HC_CLEVEL_MAX`
+/// will work. Values `> LZ4HC_CLEVEL_MAX` behave the same as `LZ4HC_CLEVEL_MAX`.
+///
+/// - return : the number of bytes written into `dst` or 0 if compression fails.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_HC(
     src: *const c_char,
@@ -514,6 +595,8 @@ pub unsafe extern "C" fn LZ4_compress_HC(
     compress_block_hc(src, dst, compressionLevel, false).map_or(0, |n| n as c_int)
 }
 
+/// Returns the size in bytes required for an `LZ4_compress_HC_extStateHC()` state buffer.
+/// Memory segment must be aligned on 8-byte boundaries.
 #[no_mangle]
 pub extern "C" fn LZ4_sizeofStateHC() -> c_int {
     cmp::max(
@@ -522,6 +605,10 @@ pub extern "C" fn LZ4_sizeofStateHC() -> c_int {
     ) as c_int
 }
 
+/// `LZ4_compress_HC_extStateHC()` :
+/// Same as `LZ4_compress_HC()`, but using an externally allocated memory segment for `state`.
+/// `state` size is provided by `LZ4_sizeofStateHC()`. Memory segment must be aligned on
+/// 8-byte boundaries (which a normal `malloc()` should do properly).
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_HC_extStateHC(
     stateHC: *mut c_void,
@@ -537,6 +624,13 @@ pub unsafe extern "C" fn LZ4_compress_HC_extStateHC(
     LZ4_compress_HC(src, dst, srcSize, maxDstSize, compressionLevel)
 }
 
+/// `LZ4_compress_HC_extStateHC_fastReset()` :
+/// A variant of `LZ4_compress_HC_extStateHC()`.
+///
+/// Using this variant avoids an expensive initialization step. It is only safe to call if
+/// the state buffer is known to be correctly initialized already. The difference is that
+/// this function initializes the provided state with a call to `LZ4_resetStreamHC_fast()`
+/// while `LZ4_compress_HC_extStateHC()` starts with a call to `LZ4_resetStreamHC()`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_HC_extStateHC_fastReset(
     state: *mut c_void,
@@ -549,6 +643,12 @@ pub unsafe extern "C" fn LZ4_compress_HC_extStateHC_fastReset(
     LZ4_compress_HC_extStateHC(state, src, dst, srcSize, dstCapacity, compressionLevel)
 }
 
+/// `LZ4_compress_HC_destSize()` : v1.9.0+
+/// Will compress as much data as possible from `src` to fit into `targetDstSize` budget.
+/// Result is provided in 2 parts :
+/// - return : the number of bytes written into `dst` (necessarily `<= targetDstSize`) or 0
+///   if compression fails.
+/// - `*srcSizePtr` : on success, updated to indicate how many bytes were read from `src`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_HC_destSize(
     stateHC: *mut c_void,
@@ -580,6 +680,7 @@ pub unsafe extern "C" fn LZ4_compress_HC_destSize(
     written as c_int
 }
 
+/// Deprecated HC compression function. Use `LZ4_compress_HC()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compressHC(
     src: *const c_char,
@@ -589,6 +690,7 @@ pub unsafe extern "C" fn LZ4_compressHC(
     LZ4_compress_HC(src, dst, srcSize, LZ4_compressBound(srcSize), 0)
 }
 
+/// Deprecated HC compression function. Use `LZ4_compress_HC()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compressHC_limitedOutput(
     src: *const c_char,
@@ -599,6 +701,7 @@ pub unsafe extern "C" fn LZ4_compressHC_limitedOutput(
     LZ4_compress_HC(src, dst, srcSize, maxDstSize, 0)
 }
 
+/// Deprecated HC compression function. Use `LZ4_compress_HC()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compressHC2(
     src: *const c_char,
@@ -609,6 +712,7 @@ pub unsafe extern "C" fn LZ4_compressHC2(
     LZ4_compress_HC(src, dst, srcSize, LZ4_compressBound(srcSize), cLevel)
 }
 
+/// Deprecated HC compression function. Use `LZ4_compress_HC()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compressHC2_limitedOutput(
     src: *const c_char,
@@ -620,6 +724,7 @@ pub unsafe extern "C" fn LZ4_compressHC2_limitedOutput(
     LZ4_compress_HC(src, dst, srcSize, maxDstSize, cLevel)
 }
 
+/// Deprecated HC compression function. Use `LZ4_compress_HC_extStateHC()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compressHC_withStateHC(
     state: *mut c_void,
@@ -630,6 +735,7 @@ pub unsafe extern "C" fn LZ4_compressHC_withStateHC(
     LZ4_compress_HC_extStateHC(state, src, dst, srcSize, LZ4_compressBound(srcSize), 0)
 }
 
+/// Deprecated HC compression function. Use `LZ4_compress_HC_extStateHC()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compressHC_limitedOutput_withStateHC(
     state: *mut c_void,
@@ -641,6 +747,7 @@ pub unsafe extern "C" fn LZ4_compressHC_limitedOutput_withStateHC(
     LZ4_compress_HC_extStateHC(state, src, dst, srcSize, maxDstSize, 0)
 }
 
+/// Deprecated HC compression function. Use `LZ4_compress_HC_extStateHC()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compressHC2_withStateHC(
     state: *mut c_void,
@@ -652,6 +759,7 @@ pub unsafe extern "C" fn LZ4_compressHC2_withStateHC(
     LZ4_compress_HC_extStateHC(state, src, dst, srcSize, LZ4_compressBound(srcSize), cLevel)
 }
 
+/// Deprecated HC compression function. Use `LZ4_compress_HC_extStateHC()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compressHC2_limitedOutput_withStateHC(
     state: *mut c_void,
@@ -664,6 +772,22 @@ pub unsafe extern "C" fn LZ4_compressHC2_limitedOutput_withStateHC(
     LZ4_compress_HC_extStateHC(state, src, dst, srcSize, maxDstSize, cLevel)
 }
 
+/// `LZ4_decompress_safe()` :
+/// - `compressedSize` : is the exact complete size of the compressed block.
+/// - `dstCapacity` : is the size of destination buffer (which must be already allocated),
+///   presumed an upper bound of decompressed size.
+/// - return : the number of bytes decompressed into destination buffer (necessarily
+///   `<= dstCapacity`). If destination buffer is not large enough, decoding will
+///   stop and output an error code (negative value). If the source stream is
+///   detected malformed, the function will stop decoding and return a negative result.
+///
+/// Note 1 : This function is protected against malicious data packets: it will never write
+/// outside `dst` buffer, nor read outside `source` buffer, even if the compressed block is
+/// maliciously modified to order the decoder to do these actions. In such case, the decoder
+/// stops immediately, and considers the compressed block malformed.
+///
+/// Note 2 : `compressedSize` and `dstCapacity` must be provided to the function, the
+/// compressed block does not contain them.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_decompress_safe(
     source: *const c_char,
@@ -679,6 +803,14 @@ pub unsafe extern "C" fn LZ4_decompress_safe(
     decompress_block(src, dst).map_or(-1, |n| n as c_int)
 }
 
+/// `LZ4_decompress_safe_usingDict()` :
+/// Works the same as a combination of `LZ4_setStreamDecode()` followed by
+/// `LZ4_decompress_safe_continue()`. However, it's stateless: it doesn't need any
+/// `LZ4_streamDecode_t` state. Dictionary is presumed stable: it must remain accessible
+/// and unmodified during decompression.
+///
+/// Performance tip : Decompression speed can be substantially increased when
+/// `dst == dictStart + dictSize`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_decompress_safe_usingDict(
     source: *const c_char,
@@ -727,6 +859,22 @@ pub unsafe extern "C" fn LZ4_decompress_safe_usingDict(
     decompress_block_with_dict(src, dst, dict).map_or(-1, |n| n as c_int)
 }
 
+/// `LZ4_decompress_safe_partial()` :
+/// Decompress an LZ4 compressed block, of size `srcSize` at position `src`, into destination
+/// buffer `dst` of size `dstCapacity`. Up to `targetOutputSize` bytes will be decoded. The
+/// function stops decoding on reaching this objective. This can be useful to boost performance
+/// whenever only the beginning of a block is required.
+///
+/// - return : the number of bytes decoded in `dst` (necessarily `<= targetOutputSize`). If
+///   source stream is detected malformed, function returns a negative result.
+///
+/// Note 1 : return can be `< targetOutputSize`, if compressed block contains less data.
+/// Note 2 : `targetOutputSize` must be `<= dstCapacity`.
+/// Note 3 : If `srcSize` is the exact size of the block, then `targetOutputSize` can be any
+///          value, including larger than the block's decompressed size. The function will,
+///          at most, generate block's decompressed size.
+/// Note 4 : If `srcSize` is _larger_ than block's compressed size, then `targetOutputSize`
+///          **MUST** be `<=` block's decompressed size. Otherwise, *silent corruption will occur*.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_decompress_safe_partial(
     source: *const c_char,
@@ -749,6 +897,12 @@ pub unsafe extern "C" fn LZ4_decompress_safe_partial(
     decompress_block_partial(src, dst, targetOutputSize as usize).map_or(-1, |n| n as c_int)
 }
 
+/// `LZ4_decompress_safe_partial_usingDict()` :
+/// Behaves the same as `LZ4_decompress_safe_partial()` with the added ability to specify a
+/// memory segment for past data.
+///
+/// Performance tip : Decompression speed can be substantially increased when
+/// `dst == dictStart + dictSize`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_decompress_safe_partial_usingDict(
     source: *const c_char,
@@ -800,6 +954,14 @@ pub unsafe extern "C" fn LZ4_decompress_safe_partial_usingDict(
         .map_or(-1, |n| n as c_int)
 }
 
+/// `LZ4_decoderRingBufferSize()` : v1.8.2+
+/// Note : in a ring buffer scenario (optional), blocks are presumed decompressed next to each
+/// other up to the moment there is not enough remaining space for next block
+/// (`remainingSize < maxBlockSize`), at which stage it resumes from beginning of ring buffer.
+/// When setting such a ring buffer for streaming decompression, provides the minimum size of
+/// this ring buffer to be compatible with any source respecting `maxBlockSize` condition.
+///
+/// - return : minimum ring buffer size, or 0 if there is an error (invalid `maxBlockSize`).
 #[no_mangle]
 pub extern "C" fn LZ4_decoderRingBufferSize(maxBlockSize: c_int) -> c_int {
     if !(0..=LZ4_MAX_INPUT_SIZE).contains(&maxBlockSize) {
@@ -809,6 +971,22 @@ pub extern "C" fn LZ4_decoderRingBufferSize(maxBlockSize: c_int) -> c_int {
     max_block_size.saturating_add((LZ4_DISTANCE_MAX + 1 + 14) as c_int)
 }
 
+/// Deprecated since v1.9.0; use `LZ4_decompress_safe_partial()` instead.
+///
+/// `LZ4_decompress_fast()` decompresses a block knowing only the uncompressed size. It is
+/// no longer faster than `LZ4_decompress_safe()` and is not protected against malformed or
+/// malicious inputs.
+///
+/// - `originalSize` : the uncompressed size to regenerate. `dst` must be already allocated,
+///   its size must be `>= originalSize` bytes.
+/// - return : number of bytes read from source buffer (== compressed size). The function
+///   expects to finish at block's end exactly. If the source stream is detected
+///   malformed, the function stops decoding and returns a negative result.
+///
+/// Note : since `LZ4_decompress_fast*()` doesn't know its `src` size, it may read an unknown
+/// amount of input, past input buffer bounds. Match offsets are not validated, so match reads
+/// from `src` may underflow too. Use these functions in trusted environments with trusted
+/// data **only**.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_decompress_fast(
     source: *const c_char,
@@ -822,6 +1000,9 @@ pub unsafe extern "C" fn LZ4_decompress_fast(
     decompress_block_exact_ptr(source as *const u8, dst, &[]).map_or(-1, |n| n as c_int)
 }
 
+/// Deprecated; use `LZ4_decompress_safe_partial_usingDict()` instead.
+/// Variant of `LZ4_decompress_fast()` accepting an external dictionary. Same security
+/// caveats apply: only use with trusted data.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_decompress_fast_usingDict(
     source: *const c_char,
@@ -847,6 +1028,7 @@ pub unsafe extern "C" fn LZ4_decompress_fast_usingDict(
     decompress_block_exact_ptr(source as *const u8, dst, dict).map_or(-1, |n| n as c_int)
 }
 
+/// Obsolete decompression function (since v1.8.0). Use `LZ4_decompress_fast()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_uncompress(
     source: *const c_char,
@@ -856,6 +1038,7 @@ pub unsafe extern "C" fn LZ4_uncompress(
     LZ4_decompress_fast(source, dest, outputSize)
 }
 
+/// Obsolete decompression function (since v1.8.0). Use `LZ4_decompress_safe()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_uncompress_unknownOutputSize(
     source: *const c_char,
@@ -866,6 +1049,8 @@ pub unsafe extern "C" fn LZ4_uncompress_unknownOutputSize(
     LZ4_decompress_safe(source, dest, isize, maxOutputSize)
 }
 
+/// Obsolete streaming decoding function (since v1.7.0). Use `LZ4_decompress_safe_usingDict()`
+/// instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_decompress_safe_withPrefix64k(
     source: *const c_char,
@@ -887,6 +1072,8 @@ pub unsafe extern "C" fn LZ4_decompress_safe_withPrefix64k(
     )
 }
 
+/// Obsolete streaming decoding function (since v1.7.0). Use `LZ4_decompress_fast_usingDict()`
+/// instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_decompress_fast_withPrefix64k(
     source: *const c_char,
@@ -906,6 +1093,13 @@ pub unsafe extern "C" fn LZ4_decompress_fast_withPrefix64k(
     )
 }
 
+/// Deprecated; consider migrating towards `LZ4_decompress_safe_continue()` instead.
+/// (Note that the contract differs: that variant requires the block's compressed size,
+/// instead of decompressed size.)
+///
+/// Streaming variant of `LZ4_decompress_fast()` that uses the previously decoded data as a
+/// dictionary. Same security caveats apply as `LZ4_decompress_fast()`: use only with trusted
+/// data.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_decompress_fast_continue(
     stream: *mut LZ4StreamDecode,
@@ -927,11 +1121,13 @@ pub unsafe extern "C" fn LZ4_decompress_fast_continue(
     }
 }
 
+/// Tells when an `LZ4F_*` function result is an error code.
 #[no_mangle]
 pub extern "C" fn LZ4F_isError(code: size_t) -> c_uint {
     (code > lz4f_error(LZ4F_ERROR_MAX_CODE)) as c_uint
 }
 
+/// Returns the error code string corresponding to `code`; for debugging.
 #[no_mangle]
 pub extern "C" fn LZ4F_getErrorName(code: size_t) -> *const c_char {
     match code {
@@ -960,6 +1156,8 @@ pub extern "C" fn LZ4F_getErrorName(code: size_t) -> *const c_char {
     }
 }
 
+/// Returns the `LZ4F_errorCodes` enum value corresponding to a function result.
+/// Returns 0 (`LZ4F_OK_NoError`) when the result is not an error.
 #[no_mangle]
 pub extern "C" fn LZ4F_getErrorCode(code: size_t) -> c_uint {
     if LZ4F_isError(code) == 0 {
@@ -969,16 +1167,22 @@ pub extern "C" fn LZ4F_getErrorCode(code: size_t) -> c_uint {
     }
 }
 
+/// Returns the value of `LZ4F_VERSION` the library was compiled with.
 #[no_mangle]
 pub extern "C" fn LZ4F_getVersion() -> c_uint {
     LZ4F_VERSION
 }
 
+/// Returns the maximum allowed compression level (currently 12). Available since v1.8.0.
 #[no_mangle]
 pub extern "C" fn LZ4F_compressionLevel_max() -> c_int {
     LZ4HC_CLEVEL_MAX
 }
 
+/// `LZ4F_getBlockSize()` :
+/// - return : in scalar format (`size_t`), the maximum block size associated with
+///   `blockSizeID`, or an error code (can be tested using `LZ4F_isError()`) if
+///   `blockSizeID` is invalid.
 #[no_mangle]
 pub extern "C" fn LZ4F_getBlockSize(blockSizeID: c_uint) -> size_t {
     if !(4..=7).contains(&blockSizeID) {
@@ -987,6 +1191,14 @@ pub extern "C" fn LZ4F_getBlockSize(blockSizeID: c_uint) -> size_t {
     block_max_size(blockSizeID as u8)
 }
 
+/// `LZ4F_createCompressionContext()` :
+/// The first thing to do is to create a compressionContext object, which will keep track of
+/// operation state during streaming compression. `version` provided MUST be `LZ4F_VERSION`.
+/// It is intended to track potential version mismatch, notably when using DLL. The function
+/// provides a pointer to a fully allocated `LZ4F_cctx` object. `cctxPtr` MUST be `!= NULL`.
+/// If return `!= zero`, context creation failed. A created compression context can be employed
+/// multiple times for consecutive streaming operations. Once all streaming compression jobs
+/// are completed, the state object can be released using `LZ4F_freeCompressionContext()`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_createCompressionContext(
     ctx: &mut LZ4FCompressionContext,
@@ -1006,6 +1218,9 @@ pub unsafe extern "C" fn LZ4F_createCompressionContext(
     0
 }
 
+/// Releases an `LZ4F_cctx` previously created by `LZ4F_createCompressionContext()`.
+/// Always successful: the return value can be ignored. Works fine with `NULL` input pointers
+/// (does nothing).
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_freeCompressionContext(ctx: LZ4FCompressionContext) -> LZ4FErrorCode {
     if !ctx.0.is_null() {
@@ -1014,6 +1229,8 @@ pub unsafe extern "C" fn LZ4F_freeCompressionContext(ctx: LZ4FCompressionContext
     0
 }
 
+/// Context size inspection (v1.10.1+). Returns the total memory footprint of the provided
+/// compression context, or 0 if `ctx` is null.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_cctx_size(ctx: LZ4FCompressionContext) -> size_t {
     if ctx.0.is_null() {
@@ -1023,6 +1240,13 @@ pub unsafe extern "C" fn LZ4F_cctx_size(ctx: LZ4FCompressionContext) -> size_t {
     }
 }
 
+/// `LZ4F_compressBegin()` :
+/// Will write the frame header into `dstBuffer`. `dstCapacity` must be
+/// `>= LZ4F_HEADER_SIZE_MAX` bytes. `prefsPtr` is optional: NULL can be provided to set all
+/// preferences to default.
+///
+/// - return : number of bytes written into `dstBuffer` for the header, or an error code
+///   (which can be tested using `LZ4F_isError()`).
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_compressBegin(
     ctx: LZ4FCompressionContext,
@@ -1047,6 +1271,18 @@ pub unsafe extern "C" fn LZ4F_compressBegin(
     header.len()
 }
 
+/// `LZ4F_compressBegin_usingDict()` : stable since v1.10
+/// Initialises dictionary compression streaming, and writes the frame header into `dstBuffer`.
+/// `dstCapacity` must be `>= LZ4F_HEADER_SIZE_MAX` bytes. `prefsPtr` is optional: one may
+/// provide NULL as argument, however it's the only way to provide `dictID` in the frame
+/// header. `dictBuffer` must outlive the compression session.
+///
+/// - return : number of bytes written into `dstBuffer` for the header, or an error code
+///   (which can be tested using `LZ4F_isError()`).
+///
+/// NOTE: The LZ4Frame spec allows each independent block to be compressed with the dictionary,
+/// but this entry supports a more limited scenario, where only the first block uses the
+/// dictionary. For larger inputs, consider `LZ4F_compressFrame_usingCDict()`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_compressBegin_usingDict(
     ctx: LZ4FCompressionContext,
@@ -1076,6 +1312,13 @@ pub unsafe extern "C" fn LZ4F_compressBegin_usingDict(
     written
 }
 
+/// `LZ4F_createCDict()` : stable since v1.10
+/// When compressing multiple messages / blocks using the same dictionary, it's recommended
+/// to initialise it just once. `LZ4F_createCDict()` will create a digested dictionary,
+/// ready to start future compression operations without startup delay. An `LZ4F_CDict` can
+/// be created once and shared by multiple threads concurrently, since its usage is read-only.
+/// `dictBuffer` can be released after `LZ4F_CDict` creation, since its content is copied
+/// within the CDict.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_createCDict(
     dictBuffer: *const c_void,
@@ -1093,6 +1336,7 @@ pub unsafe extern "C" fn LZ4F_createCDict(
     Box::into_raw(Box::new(ctx)) as *mut LZ4FCDict
 }
 
+/// Releases an `LZ4F_CDict` created by `LZ4F_createCDict()`. Does nothing if `cdict` is null.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_freeCDict(cdict: *mut LZ4FCDict) {
     if !cdict.is_null() {
@@ -1100,6 +1344,14 @@ pub unsafe extern "C" fn LZ4F_freeCDict(cdict: *mut LZ4FCDict) {
     }
 }
 
+/// `LZ4F_compressBegin_usingCDict()` : stable since v1.10
+/// Initialises streaming dictionary compression, and writes the frame header into `dstBuffer`.
+/// `dstCapacity` must be `>= LZ4F_HEADER_SIZE_MAX` bytes. `prefsPtr` is optional: one may
+/// provide NULL as argument, but note that it's the only way to insert a `dictID` in the
+/// frame header. `cdict` must outlive the compression session.
+///
+/// - return : number of bytes written into `dstBuffer` for the header, or an error code,
+///   which can be tested using `LZ4F_isError()`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_compressBegin_usingCDict(
     ctx: LZ4FCompressionContext,
@@ -1122,6 +1374,24 @@ pub unsafe extern "C" fn LZ4F_compressBegin_usingCDict(
     )
 }
 
+/// `LZ4F_compressBound()` :
+/// Provides minimum `dstCapacity` required to guarantee success of `LZ4F_compressUpdate()`,
+/// given a `srcSize` and preferences, for a worst case scenario. When `srcSize == 0`,
+/// `LZ4F_compressBound()` provides an upper bound for `LZ4F_flush()` and `LZ4F_compressEnd()`
+/// instead. Note that the result is only valid for a single invocation of
+/// `LZ4F_compressUpdate()`. When invoking `LZ4F_compressUpdate()` multiple times, if the
+/// output buffer is gradually filled up instead of emptied and re-used from its start, one
+/// must check if there is enough remaining capacity before each invocation, using
+/// `LZ4F_compressBound()`.
+///
+/// `prefsPtr` is optional: when NULL is provided, preferences will be set to cover the
+/// worst case scenario.
+///
+/// tech details: if automatic flushing is not enabled, the return value includes the
+/// possibility that internal buffer might already be filled by up to `(blockSize-1)` bytes.
+/// It also includes frame footer (ending + checksum), since it might be generated by
+/// `LZ4F_compressEnd()`. It does not include the frame header, as it was already generated
+/// by `LZ4F_compressBegin()`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_compressBound(
     srcSize: size_t,
@@ -1138,6 +1408,13 @@ pub unsafe extern "C" fn LZ4F_compressBound(
     srcSize + blocks * (4 + checksums) + 16
 }
 
+/// `LZ4F_compressFrameBound()` :
+/// Returns the maximum possible compressed size with `LZ4F_compressFrame()` given `srcSize`
+/// and preferences. `preferencesPtr` is optional: it can be replaced by NULL, in which case
+/// the function will assume default preferences.
+///
+/// Note : this result is only usable with `LZ4F_compressFrame()`. It may also be relevant to
+/// `LZ4F_compressUpdate()` _only if_ no `flush()` operation is ever performed.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_compressFrameBound(
     srcSize: size_t,
@@ -1146,6 +1423,17 @@ pub unsafe extern "C" fn LZ4F_compressFrameBound(
     LZ4F_compressBound(srcSize, preferencesPtr) + 19 + 4
 }
 
+/// `LZ4F_compressFrame()` :
+/// Compress `srcBuffer` content into an LZ4-compressed frame. It's a one shot operation,
+/// all input content is consumed, and all output is generated.
+///
+/// Note : it's a stateless operation (no `LZ4F_cctx` state needed).
+///
+/// - `dstCapacity` MUST be `>= LZ4F_compressFrameBound(srcSize, preferencesPtr)`.
+/// - `preferencesPtr` is optional: one can provide NULL, in which case all preferences are
+///   set to default.
+/// - return : number of bytes written into `dstBuffer`, or an error code if it fails (can
+///   be tested using `LZ4F_isError()`).
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_compressFrame(
     dstBuffer: *mut c_void,
@@ -1195,6 +1483,20 @@ pub unsafe extern "C" fn LZ4F_compressFrame(
     pos + end
 }
 
+/// `LZ4F_compressFrame_usingCDict()` : stable since v1.10
+/// Compress an entire `srcBuffer` into a valid LZ4 frame using a digested Dictionary.
+/// `cctx` must point to a context created by `LZ4F_createCompressionContext()`. If
+/// `cdict == NULL`, compress without a dictionary. `dstBuffer` MUST be
+/// `>= LZ4F_compressFrameBound(srcSize, preferencesPtr)`. If this condition is not
+/// respected, function will fail (return an errorCode). The `LZ4F_preferences_t` structure
+/// is optional: one may provide NULL as argument, but it's not recommended, as it's the
+/// only way to provide `dictID` in the frame header.
+///
+/// - return : number of bytes written into `dstBuffer`, or an error code if it fails (can
+///   be tested using `LZ4F_isError()`).
+///
+/// Note: for larger inputs generating multiple independent blocks, this entry point uses
+/// the dictionary for each block.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_compressFrame_usingCDict(
     ctx: LZ4FCompressionContext,
@@ -1237,6 +1539,22 @@ pub unsafe extern "C" fn LZ4F_compressFrame_usingCDict(
     pos + end
 }
 
+/// `LZ4F_compressUpdate()` :
+/// Can be called repetitively to compress as much data as necessary.
+///
+/// Important rule: `dstCapacity` MUST be large enough to ensure operation success even in
+/// worst case situations. This value is provided by `LZ4F_compressBound()`. If this
+/// condition is not respected, `LZ4F_compressUpdate()` will fail (result is an errorCode).
+/// After an error, the state is left in a UB state, and must be re-initialised or freed.
+///
+/// If previously an uncompressed block was written, buffered data is flushed before
+/// appending compressed data is continued.
+///
+/// `cOptPtr` is optional: NULL can be provided, in which case all options are set to default.
+///
+/// - return : number of bytes written into `dstBuffer` (it can be zero, meaning input data
+///   was just buffered), or an error code if it fails (which can be tested using
+///   `LZ4F_isError()`).
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_compressUpdate(
     ctx: LZ4FCompressionContext,
@@ -1315,6 +1633,23 @@ fn compress_frame_update_block(inner: &mut CompressionCtx, src: &[u8], dst: &mut
     needed
 }
 
+/// `LZ4F_uncompressedUpdate()` :
+/// Can be called repetitively to add data stored as uncompressed blocks.
+///
+/// Important rule: `dstCapacity` MUST be large enough to store the entire source buffer as
+/// no compression is done for this operation. If this condition is not respected,
+/// `LZ4F_uncompressedUpdate()` will fail (result is an errorCode). After an error, the
+/// state is left in a UB state, and must be re-initialised or freed.
+///
+/// If previously a compressed block was written, buffered data is flushed first, before
+/// appending uncompressed data is continued. This operation is only supported when
+/// `LZ4F_blockIndependent` is used.
+///
+/// `cOptPtr` is optional: NULL can be provided, in which case all options are set to default.
+///
+/// - return : number of bytes written into `dstBuffer` (it can be zero, meaning input data
+///   was just buffered), or an error code if it fails (which can be tested using
+///   `LZ4F_isError()`).
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_uncompressedUpdate(
     ctx: LZ4FCompressionContext,
@@ -1377,6 +1712,20 @@ fn compress_frame_raw_block(inner: &mut CompressionCtx, src: &[u8], dst: &mut [u
     needed
 }
 
+/// `LZ4F_flush()` :
+/// When data must be generated and sent immediately, without waiting for a block to be
+/// completely filled, it's possible to call `LZ4F_flush()`. It will immediately compress
+/// any data buffered within `cctx`.
+///
+/// `dstCapacity` must be large enough to ensure the operation will be successful. `cOptPtr`
+/// is optional: it's possible to provide NULL, all options will be set to default.
+///
+/// - return : nb of bytes written into `dstBuffer` (can be zero, when there is no data
+///   stored within `cctx`), or an error code if it fails (which can be tested using
+///   `LZ4F_isError()`).
+///
+/// Note : `LZ4F_flush()` is guaranteed to be successful when
+/// `dstCapacity >= LZ4F_compressBound(0, prefsPtr)`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_flush(
     ctx: LZ4FCompressionContext,
@@ -1394,6 +1743,18 @@ pub unsafe extern "C" fn LZ4F_flush(
     0
 }
 
+/// `LZ4F_compressEnd()` :
+/// To properly finish an LZ4 frame, invoke `LZ4F_compressEnd()`. It will flush whatever
+/// data remained within `cctx` (like `LZ4F_flush()`) and properly finalise the frame, with
+/// an endMark and a checksum. `cOptPtr` is optional: NULL can be provided, in which case
+/// all options will be set to default.
+///
+/// - return : nb of bytes written into `dstBuffer`, necessarily `>= 4` (endMark), or an
+///   error code if it fails (which can be tested using `LZ4F_isError()`).
+///
+/// Note : `LZ4F_compressEnd()` is guaranteed to be successful when
+/// `dstCapacity >= LZ4F_compressBound(0, prefsPtr)`. A successful call makes `cctx` available
+/// again for another compression task.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_compressEnd(
     ctx: LZ4FCompressionContext,
@@ -1421,6 +1782,14 @@ pub unsafe extern "C" fn LZ4F_compressEnd(
     needed
 }
 
+/// `LZ4F_createDecompressionContext()` :
+/// Create an `LZ4F_dctx` object, to track all decompression operations. `version` provided
+/// MUST be `LZ4F_VERSION`. `dctxPtr` MUST be valid. The function fills `dctxPtr` with the
+/// value of a pointer to an allocated and initialised `LZ4F_dctx` object. The return is an
+/// errorCode, which can be tested using `LZ4F_isError()`. dctx memory can be released using
+/// `LZ4F_freeDecompressionContext()`; its result indicates current state of decompression
+/// context when being released. That is, it should be `== 0` if decompression has been
+/// completed fully and correctly.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_createDecompressionContext(
     ctx: &mut LZ4FDecompressionContext,
@@ -1433,6 +1802,7 @@ pub unsafe extern "C" fn LZ4F_createDecompressionContext(
     0
 }
 
+/// Releases an `LZ4F_dctx` previously created by `LZ4F_createDecompressionContext()`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_freeDecompressionContext(
     ctx: LZ4FDecompressionContext,
@@ -1443,6 +1813,8 @@ pub unsafe extern "C" fn LZ4F_freeDecompressionContext(
     0
 }
 
+/// Context size inspection (v1.10.1+). Returns the total memory footprint of the provided
+/// decompression context, or 0 if `ctx` is null.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_dctx_size(ctx: LZ4FDecompressionContext) -> size_t {
     if ctx.0.is_null() {
@@ -1452,6 +1824,39 @@ pub unsafe extern "C" fn LZ4F_dctx_size(ctx: LZ4FDecompressionContext) -> size_t
     }
 }
 
+/// `LZ4F_getFrameInfo()` :
+/// This function extracts frame parameters (max blockSize, dictID, etc.). Its usage is
+/// optional: user can also invoke `LZ4F_decompress()` directly.
+///
+/// Extracted information will fill an existing `LZ4F_frameInfo_t` structure. This can be
+/// useful for allocation and dictionary identification purposes.
+///
+/// `LZ4F_getFrameInfo()` can work in the following situations:
+///
+/// 1) At the beginning of a new frame, before any invocation of `LZ4F_decompress()`. It will
+///    decode the header from `srcBuffer`, consuming the header and starting the decoding
+///    process. Input size must be large enough to contain the full frame header. Frame
+///    header size can be known beforehand by `LZ4F_headerSize()`. Frame header size is
+///    variable but is guaranteed to be `>= LZ4F_HEADER_SIZE_MIN` bytes and
+///    `<= LZ4F_HEADER_SIZE_MAX` bytes. Hence blindly providing `LZ4F_HEADER_SIZE_MAX` bytes
+///    or more will always work. If input size is not large enough, function will fail and
+///    return an error code.
+///
+/// 2) After decoding has been started, it's possible to invoke `LZ4F_getFrameInfo()` anytime
+///    to extract already-decoded frame parameters stored within `dctx`. If decoding has
+///    barely started and not yet read enough information to decode the header, this fails.
+///
+/// The number of bytes consumed from `srcBuffer` will be updated in `*srcSizePtr`. The
+/// function only consumes bytes when decoding has not yet started, and when decoding the
+/// header has been successful. Decompression must then resume from `(srcBuffer + *srcSizePtr)`.
+///
+/// - return : a hint about how many `srcSize` bytes `LZ4F_decompress()` expects for next
+///   call, or an error code which can be tested using `LZ4F_isError()`.
+///
+/// note 1 : in case of error, `dctx` is not modified. Decoding operation can resume from
+///          beginning safely.
+/// note 2 : frame parameters are *copied into* an already-allocated `LZ4F_frameInfo_t`
+///          structure.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_getFrameInfo(
     ctx: LZ4FDecompressionContext,
@@ -1533,6 +1938,15 @@ pub unsafe extern "C" fn LZ4F_getFrameInfo(
     0
 }
 
+/// `LZ4F_headerSize()` : v1.9.0+
+/// Provide the header size of a frame starting at `src`. `srcSize` must be
+/// `>= LZ4F_MIN_SIZE_TO_KNOW_HEADER_LENGTH`, which is enough to decode the header length.
+///
+/// - return : size of frame header, or an error code, which can be tested using
+///   `LZ4F_isError()`.
+///
+/// note : Frame header size is variable, but is guaranteed to be `>= LZ4F_HEADER_SIZE_MIN`
+/// bytes, and `<= LZ4F_HEADER_SIZE_MAX` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_headerSize(src: *const c_void, srcSize: size_t) -> size_t {
     if src.is_null() {
@@ -1551,6 +1965,36 @@ pub unsafe extern "C" fn LZ4F_headerSize(src: *const c_void, srcSize: size_t) ->
     expected_frame_header_len(src).unwrap_or(ERROR_BAD_HEADER)
 }
 
+/// Incrementally decompresses an LZ4 frame into user-provided buffers.
+///
+/// Call repeatedly until the return value is 0 (frame fully decoded) or an error is reported.
+/// On each call, the function consumes up to `*srcSizePtr` bytes from `srcBuffer` and
+/// produces up to `*dstSizePtr` bytes into `dstBuffer`. It updates both size pointers with
+/// the actual number of bytes consumed/produced. There is no separate flush step.
+///
+/// Typical loop:
+/// - Provide whatever input you have and an available output buffer.
+/// - Read how much input was consumed and how much output was produced.
+/// - Use the returned value as a hint for how many source bytes are ideal next time.
+///
+/// Returns:
+/// - `> 0` : Hint (in bytes) for how many source bytes are ideal to provide on the next
+///   call. The current frame is not yet complete.
+/// - `0` : The current frame is fully decoded. If `*srcSizePtr` is less than the provided
+///   value, the unconsumed tail is the start of another frame (if any).
+/// - error : An error code; test with `LZ4F_isError(ret)`. After an error, `dctx` is not
+///   resumable: call `LZ4F_resetDecompressionContext()` before reusing it.
+///
+/// Notes:
+/// - The function may not consume all provided input on each call. Always check `*srcSizePtr`.
+///   Present any unconsumed source bytes again on the next call.
+/// - `dstBuffer` content is overwritten; it does not need to be stable across calls.
+/// - After finishing a frame (return == 0), you may immediately start feeding the next frame
+///   into the same `dctx`.
+///
+/// Warning: If you called `LZ4F_getFrameInfo()` beforehand, you must advance `srcBuffer`
+/// and decrease `*srcSizePtr` by the number of bytes it consumed (the frame header).
+/// Failing to do so can cause decompression failure or, worse, silent corruption.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_decompress(
     ctx: LZ4FDecompressionContext,
@@ -1689,6 +2133,9 @@ pub unsafe extern "C" fn LZ4F_decompress(
     frame_hint(inner)
 }
 
+/// `LZ4F_decompress_usingDict()` : stable since v1.10
+/// Same as `LZ4F_decompress()`, using a predefined dictionary. Dictionary is used "in place",
+/// without any preprocessing. It must remain accessible throughout the entire frame decoding.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_decompress_usingDict(
     ctx: LZ4FDecompressionContext,
@@ -1726,6 +2173,11 @@ pub unsafe extern "C" fn LZ4F_decompress_usingDict(
     )
 }
 
+/// `LZ4F_resetDecompressionContext()` : added in v1.8.0
+/// In case of an error, the context is left in "undefined" state. In which case, it's
+/// necessary to reset it, before re-using it. This method can also be used to abruptly stop
+/// any unfinished decompression, and start a new one using same context resources. Always
+/// successful.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4F_resetDecompressionContext(ctx: LZ4FDecompressionContext) {
     if !ctx.0.is_null() {
@@ -1733,11 +2185,20 @@ pub unsafe extern "C" fn LZ4F_resetDecompressionContext(ctx: LZ4FDecompressionCo
     }
 }
 
+/// Allocate and initialize an `LZ4_stream_t` streaming compression state.
+///
+/// A newly created state is automatically initialized. The same state can be
+/// re-used multiple times consecutively, starting each new stream of blocks
+/// with `LZ4_resetStream_fast()`. Release with `LZ4_freeStream()`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_createStream() -> *mut LZ4StreamEncode {
     Box::into_raw(Box::<EncodeStreamCtx>::default()) as *mut LZ4StreamEncode
 }
 
+/// Release a streaming compression state previously allocated with
+/// `LZ4_createStream()`.
+///
+/// Returns 0; passing NULL is safe and treated as a no-op.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_freeStream(stream: *mut LZ4StreamEncode) -> c_int {
     if !stream.is_null() {
@@ -1746,6 +2207,13 @@ pub unsafe extern "C" fn LZ4_freeStream(stream: *mut LZ4StreamEncode) -> c_int {
     0
 }
 
+/// Deprecated wrapper for streaming compression; use
+/// `LZ4_compress_fast_continue()` instead.
+///
+/// Compresses `src` into `dst` using data from previously compressed blocks
+/// as dictionary, with default acceleration. Returns the size of the
+/// compressed block, or 0 on error (typically, output does not fit into
+/// `dst`).
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_continue(
     stream: *mut LZ4StreamEncode,
@@ -1778,6 +2246,31 @@ pub unsafe extern "C" fn LZ4_compress_continue(
     written
 }
 
+/// Compress `src` content using data from previously compressed blocks, for
+/// better compression ratio.
+///
+/// `dst` buffer must be already allocated. If `dstCapacity >=
+/// LZ4_compressBound(srcSize)`, compression is guaranteed to succeed, and
+/// runs faster.
+///
+/// Returns the size of the compressed block, or 0 if there is an error
+/// (typically, cannot fit into `dst`).
+///
+/// Note 1: Each invocation generates a new block; each block has precise
+/// boundaries and must be decompressed separately.
+///
+/// Note 2: The previous 64KB of source data is assumed to remain present,
+/// unmodified, at the same address in memory.
+///
+/// Note 3: When input is structured as a double-buffer, each buffer can have
+/// any size, including < 64 KB. Make sure buffers are separated by at least
+/// one byte.
+///
+/// Note 4: If input buffer is a ring-buffer, it can have any size, including
+/// < 64 KB.
+///
+/// Note 5: After an error, the stream status is undefined (invalid); it can
+/// only be reset or freed.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_fast_continue(
     stream: *mut LZ4StreamEncode,
@@ -1812,6 +2305,8 @@ pub unsafe extern "C" fn LZ4_compress_fast_continue(
     written
 }
 
+/// Deprecated wrapper for streaming compression with output size limit; use
+/// `LZ4_compress_fast_continue()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_limitedOutput_continue(
     stream: *mut LZ4StreamEncode,
@@ -1823,6 +2318,24 @@ pub unsafe extern "C" fn LZ4_compress_limitedOutput_continue(
     LZ4_compress_continue(stream, src, dst, srcSize, maxOutputSize)
 }
 
+/// Prepare an `LZ4_stream_t` for a new chain of dependent blocks
+/// (e.g., `LZ4_compress_fast_continue()`).
+///
+/// An `LZ4_stream_t` must be initialized once before use. This is
+/// automatically done when created by `LZ4_createStream()`. However, when
+/// the structure is simply declared on stack, `LZ4_initStream()` must be
+/// used first.
+///
+/// After init, start any new stream with `LZ4_resetStream_fast()`. The same
+/// `LZ4_stream_t` can be re-used multiple times to compress multiple
+/// streams, provided each new stream starts with `LZ4_resetStream_fast()`.
+///
+/// `LZ4_resetStream_fast()` is much faster than `LZ4_initStream()`, but is
+/// not compatible with memory regions containing garbage data.
+///
+/// Note: it's only useful to call `LZ4_resetStream_fast()` in the context
+/// of streaming compression. The `*extState*` functions perform their own
+/// resets.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_resetStream_fast(stream: *mut LZ4StreamEncode) {
     if !stream.is_null() {
@@ -1832,11 +2345,29 @@ pub unsafe extern "C" fn LZ4_resetStream_fast(stream: *mut LZ4StreamEncode) {
     }
 }
 
+/// Initialize an `LZ4_stream_t` structure.
+///
+/// An `LZ4_stream_t` structure must be initialized at least once; this is
+/// done with `LZ4_initStream()` or `LZ4_resetStream()`. Consider switching
+/// to `LZ4_initStream()`; `LZ4_resetStream()` will trigger deprecation
+/// warnings in a future version.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_resetStream(stream: *mut LZ4StreamEncode) {
     LZ4_resetStream_fast(stream)
 }
 
+/// Properly initialize a newly declared `LZ4_stream_t`.
+///
+/// An `LZ4_stream_t` structure must be initialized at least once. This is
+/// automatically done when invoking `LZ4_createStream()`, but it's not done
+/// when the structure is simply declared on stack.
+///
+/// `LZ4_initStream()` can also initialize any arbitrary buffer of sufficient
+/// size, and will return a pointer of proper type upon initialization.
+///
+/// Initialization fails (returns NULL) if size and alignment conditions are
+/// not respected. An `LZ4_stream_t` structure guarantees correct alignment
+/// and size.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_initStream(
     stateBuffer: *mut c_void,
@@ -1858,16 +2389,28 @@ pub unsafe extern "C" fn LZ4_initStream(
     stateBuffer as *mut LZ4StreamEncode
 }
 
+/// Deprecated obsolete streaming constructor; use `LZ4_createStream()`
+/// instead.
+///
+/// Preserved for ABI compatibility. The `inputBuffer` argument is ignored;
+/// history is no longer tracked through this entry point.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_create(_inputBuffer: *mut c_char) -> *mut c_void {
     LZ4_createStream() as *mut c_void
 }
 
+/// Deprecated: use `LZ4_createStream()` instead.
+///
+/// Returns the size in bytes of an `LZ4_stream_t` state buffer.
 #[no_mangle]
 pub extern "C" fn LZ4_sizeofStreamState() -> c_int {
     LZ4_sizeofState()
 }
 
+/// Deprecated: use `LZ4_resetStream()` instead.
+///
+/// Resets a user-provided state buffer; the `inputBuffer` argument is
+/// ignored. Returns 0 on success, non-zero if `state` is NULL.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_resetStreamState(
     state: *mut c_void,
@@ -1880,6 +2423,10 @@ pub unsafe extern "C" fn LZ4_resetStreamState(
     0
 }
 
+/// Deprecated: use `LZ4_saveDict()` instead.
+///
+/// Obsolete streaming helper preserved for ABI compatibility; returns a
+/// pointer to the dictionary tail when present, NULL otherwise.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_slideInputBuffer(state: *mut c_void) -> *mut c_char {
     if state.is_null() {
@@ -1893,6 +2440,28 @@ pub unsafe extern "C" fn LZ4_slideInputBuffer(state: *mut c_void) -> *mut c_char
     }
 }
 
+/// Attach a static dictionary stream to a working stream for efficient
+/// re-use.
+///
+/// Rather than re-loading the dictionary buffer into a working context
+/// before each compression, this function introduces a no-copy setup
+/// mechanism in which the working stream references `dictionaryStream`
+/// in-place.
+///
+/// Only states which have been prepared by `LZ4_loadDict()` or
+/// `LZ4_loadDictSlow()` should be expected to work as the dictionary
+/// stream. Alternatively, `dictionaryStream` may be NULL, in which case
+/// any existing dictionary stream is unset.
+///
+/// If a dictionary is provided, it replaces any pre-existing stream
+/// history. The dictionary contents are the only history that can be
+/// referenced and logically immediately precede the data compressed in
+/// the first subsequent compression call.
+///
+/// The dictionary will only remain attached through the first compression
+/// call, at the end of which it is cleared. `dictionaryStream` (and its
+/// source buffer) must remain in-place / accessible / unchanged through
+/// the completion of the compression session.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_attach_dictionary(
     workingStream: *mut LZ4StreamEncode,
@@ -1911,6 +2480,17 @@ pub unsafe extern "C" fn LZ4_attach_dictionary(
     }
 }
 
+/// Reference a static dictionary into an `LZ4_stream_t`.
+///
+/// The dictionary must remain available during compression.
+/// `LZ4_loadDict()` triggers a reset, so any previous data will be
+/// forgotten. The same dictionary must be loaded on the decompression side
+/// for successful decoding. Dictionaries are useful for better compression
+/// of small data (KB range). Loading a size of 0 is allowed and is the
+/// same as a reset.
+///
+/// Returns the loaded dictionary size, in bytes (only the last 64 KB are
+/// loaded).
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_loadDict(
     stream: *mut LZ4StreamEncode,
@@ -1931,6 +2511,15 @@ pub unsafe extern "C" fn LZ4_loadDict(
     ctx.dictionary.len() as c_int
 }
 
+/// Same as `LZ4_loadDict()`, but uses a bit more CPU to reference the
+/// dictionary content more thoroughly.
+///
+/// This is expected to slightly improve compression ratio. The extra-CPU
+/// cost is likely worth it if the dictionary is re-used across multiple
+/// sessions.
+///
+/// Returns the loaded dictionary size, in bytes (only the last 64 KB are
+/// loaded).
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_loadDictSlow(
     stream: *mut LZ4StreamEncode,
@@ -1940,6 +2529,16 @@ pub unsafe extern "C" fn LZ4_loadDictSlow(
     LZ4_loadDict(stream, dictionary, dictSize)
 }
 
+/// Save the last 64 KB of stream history into a safe buffer.
+///
+/// If the last 64 KB of data cannot be guaranteed to remain available at
+/// its current memory location, save it into a safer place (`safeBuffer`).
+/// This is schematically equivalent to a `memcpy()` followed by
+/// `LZ4_loadDict()`, but is much faster because `LZ4_saveDict()` doesn't
+/// need to rebuild tables.
+///
+/// Returns the saved dictionary size in bytes (necessarily <=
+/// `maxDictSize`), or 0 on error.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_saveDict(
     stream: *mut LZ4StreamEncode,
@@ -1969,11 +2568,21 @@ pub unsafe extern "C" fn LZ4_saveDict(
     keep as c_int
 }
 
+/// Allocate memory for an LZ4 HC streaming state and initialize it.
+///
+/// Newly created states are automatically initialized. The same state can
+/// be used multiple times consecutively, starting with
+/// `LZ4_resetStreamHC_fast()` to start a new stream of blocks. Release with
+/// `LZ4_freeStreamHC()`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_createStreamHC() -> *mut LZ4StreamHC {
     Box::into_raw(Box::<HcStreamCtx>::default()) as *mut LZ4StreamHC
 }
 
+/// Release an LZ4 HC streaming state previously allocated with
+/// `LZ4_createStreamHC()`.
+///
+/// Returns 0; passing NULL is safe and treated as a no-op.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_freeStreamHC(stream: *mut LZ4StreamHC) -> c_int {
     if !stream.is_null() {
@@ -1982,6 +2591,20 @@ pub unsafe extern "C" fn LZ4_freeStreamHC(stream: *mut LZ4StreamHC) -> c_int {
     0
 }
 
+/// Quickly prepare an `LZ4_streamHC_t` for a new compression.
+///
+/// When an `LZ4_streamHC_t` is known to be in an internally coherent state,
+/// it can often be prepared for a new compression with almost no work,
+/// only sometimes falling back to the full reset performed by
+/// `LZ4_resetStreamHC()`.
+///
+/// `LZ4_streamHC_t`s are guaranteed to be in a valid state when returned
+/// from `LZ4_createStreamHC()`, reset by `LZ4_resetStreamHC()`, after a
+/// `memset` to zero, or after a successful compression call.
+///
+/// A stream that was last used in a compression call that returned an
+/// error may be passed to this function; however, it will be fully reset,
+/// which will clear any existing history and settings.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_resetStreamHC_fast(stream: *mut LZ4StreamHC, compressionLevel: c_int) {
     if !stream.is_null() {
@@ -1992,11 +2615,25 @@ pub unsafe extern "C" fn LZ4_resetStreamHC_fast(stream: *mut LZ4StreamHC, compre
     }
 }
 
+/// Reset an `LZ4_streamHC_t` to a clean state with the given compression
+/// level.
+///
+/// Replaced by `LZ4_initStreamHC()`. The intention is to emphasize the
+/// difference with `LZ4_resetStreamHC_fast()`, which is now the
+/// recommended function to start a new stream of blocks but cannot be used
+/// to initialize a memory segment containing arbitrary garbage data. It is
+/// recommended to switch to `LZ4_initStreamHC()`; `LZ4_resetStreamHC()`
+/// will generate deprecation warnings in a future version.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_resetStreamHC(stream: *mut LZ4StreamHC, compressionLevel: c_int) {
     LZ4_resetStreamHC_fast(stream, compressionLevel)
 }
 
+/// Initialize an `LZ4_streamHC_t` placed in a user-provided buffer.
+///
+/// Required before first use of a statically allocated `LZ4_streamHC_t`.
+/// Returns NULL if size or alignment requirements are not met. Before
+/// v1.9.0, use `LZ4_resetStreamHC()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_initStreamHC(buffer: *mut c_void, size: size_t) -> *mut LZ4StreamHC {
     if buffer.is_null() {
@@ -2012,6 +2649,8 @@ pub unsafe extern "C" fn LZ4_initStreamHC(buffer: *mut c_void, size: size_t) -> 
     buffer as *mut LZ4StreamHC
 }
 
+/// Change compression level between successive invocations of
+/// `LZ4_compress_HC_continue*()` for dynamic adaptation.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_setCompressionLevel(
     stream: *mut LZ4StreamHC,
@@ -2022,6 +2661,10 @@ pub unsafe extern "C" fn LZ4_setCompressionLevel(
     }
 }
 
+/// Make the optimal parser favor decompression speed over compression
+/// ratio.
+///
+/// Only applicable to compression levels >= `LZ4HC_CLEVEL_OPT_MIN`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_favorDecompressionSpeed(stream: *mut LZ4StreamHC, favor: c_int) {
     if !stream.is_null() {
@@ -2029,6 +2672,25 @@ pub unsafe extern "C" fn LZ4_favorDecompressionSpeed(stream: *mut LZ4StreamHC, f
     }
 }
 
+/// Attach a static HC dictionary stream to a working stream for efficient
+/// re-use across many compressions.
+///
+/// Rather than re-loading the dictionary buffer into a working context
+/// before each compression, this function introduces a no-copy setup
+/// mechanism in which the working stream references the dictionary stream
+/// in-place. Only streams which have been prepared by `LZ4_loadDictHC()`
+/// should be expected to work as the dictionary stream.
+///
+/// Alternatively, `dictionary_stream` may be NULL, in which case any
+/// existing dictionary stream is unset.
+///
+/// A dictionary should only be attached to a stream without any history
+/// (i.e., a stream that has just been reset). The dictionary will remain
+/// attached to the working stream only for the current stream session;
+/// calls to `LZ4_resetStreamHC(_fast)` will remove the dictionary context
+/// association. The dictionary stream (and source buffer) must remain
+/// in-place / accessible / unchanged through the lifetime of the stream
+/// session.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_attach_HC_dictionary(
     working_stream: *mut LZ4StreamHC,
@@ -2047,6 +2709,11 @@ pub unsafe extern "C" fn LZ4_attach_HC_dictionary(
     }
 }
 
+/// Load an initial "fictional block" as a dictionary into an HC stream.
+///
+/// Note: In order for `LZ4_loadDictHC()` to create the correct data
+/// structures, it is essential to set the compression level _before_
+/// loading the dictionary. Only the last 64 KB of the dictionary are kept.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_loadDictHC(
     stream: *mut LZ4StreamHC,
@@ -2067,6 +2734,13 @@ pub unsafe extern "C" fn LZ4_loadDictHC(
     keep as c_int
 }
 
+/// Save HC stream history content (up to 64 KB) into a user-provided
+/// buffer.
+///
+/// Returns the size of the dictionary effectively saved (<= MIN(maxDictSize,
+/// 64 KB)). This function is always successful and expects its arguments to
+/// be valid. Note that `(NULL, 0)` is valid but `(NULL, !0)` is not, and
+/// will result in a segfault (or assertion failure).
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_saveDictHC(
     stream: *mut LZ4StreamHC,
@@ -2101,6 +2775,19 @@ pub unsafe extern "C" fn LZ4_saveDictHC(
     keep as c_int
 }
 
+/// Compress a block of data using LZ4-HC streaming, using previous blocks
+/// as the dictionary.
+///
+/// Compresses successive blocks of any size; previous blocks (up to 64 KB)
+/// are used as a dictionary to improve compression ratio. Previous input
+/// blocks (and the initial dictionary, if any) must remain accessible and
+/// unmodified during compression.
+///
+/// `dst` should be sized to handle worst-case scenarios (see
+/// `LZ4_compressBound()`, which ensures compression success). On failure
+/// the state must be reset; the API does not guarantee recovery.
+/// To ensure success when `dst` cannot be sized to `LZ4_compressBound()`,
+/// consider using `LZ4_compress_HC_continue_destSize()`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_HC_continue(
     stream: *mut LZ4StreamHC,
@@ -2127,6 +2814,10 @@ pub unsafe extern "C" fn LZ4_compress_HC_continue(
     )
 }
 
+/// Internal helper: compress one block through an HC streaming context and
+/// then append the just-compressed input to the context's dictionary
+/// window. Shared by `LZ4_compress_HC_continue()` and the deprecated
+/// `LZ4_compressHC2_*` entry points.
 fn compress_hc_stream_block(
     ctx: &mut HcStreamCtx,
     src: &[u8],
@@ -2158,6 +2849,13 @@ fn compress_hc_stream_block(
     written
 }
 
+/// Similar to `LZ4_compress_HC_continue()`, but reads as much data as
+/// possible from `src` to fit into the `targetDstSize` budget.
+///
+/// Returns the number of bytes written into `dst` (necessarily <=
+/// `targetDstSize`), or 0 if compression fails. On success `*srcSizePtr` is
+/// updated to indicate how many bytes were read from `src`. Note that this
+/// function may not consume the entire input.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_HC_continue_destSize(
     stream: *mut LZ4StreamHC,
@@ -2220,6 +2918,10 @@ pub unsafe extern "C" fn LZ4_compress_HC_continue_destSize(
     written
 }
 
+/// Deprecated: use `LZ4_compress_HC_continue()` instead.
+///
+/// Compresses one block using HC streaming with `dst` capacity implicitly
+/// set to `LZ4_compressBound(srcSize)`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compressHC_continue(
     stream: *mut LZ4StreamHC,
@@ -2230,6 +2932,10 @@ pub unsafe extern "C" fn LZ4_compressHC_continue(
     LZ4_compress_HC_continue(stream, src, dst, srcSize, LZ4_compressBound(srcSize))
 }
 
+/// Deprecated: use `LZ4_compress_HC_continue()` instead.
+///
+/// Compresses one block using HC streaming, with an explicit output size
+/// limit.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compressHC_limitedOutput_continue(
     stream: *mut LZ4StreamHC,
@@ -2241,6 +2947,10 @@ pub unsafe extern "C" fn LZ4_compressHC_limitedOutput_continue(
     LZ4_compress_HC_continue(stream, src, dst, srcSize, maxDstSize)
 }
 
+/// Deprecated: use `LZ4_compress_HC_continue()` instead.
+///
+/// Compresses one block using HC streaming with an explicit compression
+/// level; `dst` capacity is implicitly set to `LZ4_compressBound(srcSize)`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compressHC2_continue(
     stream: *mut c_void,
@@ -2271,6 +2981,10 @@ pub unsafe extern "C" fn LZ4_compressHC2_continue(
     )
 }
 
+/// Deprecated: use `LZ4_compress_HC_continue()` instead.
+///
+/// Compresses one block using HC streaming with an explicit compression
+/// level and an output size limit.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compressHC2_limitedOutput_continue(
     stream: *mut c_void,
@@ -2298,21 +3012,34 @@ pub unsafe extern "C" fn LZ4_compressHC2_limitedOutput_continue(
     )
 }
 
+/// Deprecated: use `LZ4_createStreamHC()` instead.
+///
+/// Returns the size in bytes of an `LZ4_streamHC_t` state buffer.
 #[no_mangle]
 pub extern "C" fn LZ4_sizeofStreamStateHC() -> c_int {
     LZ4_sizeofStateHC()
 }
 
+/// Deprecated: use `LZ4_createStreamHC()` instead.
+///
+/// Obsolete HC streaming constructor; the `inputBuffer` argument is
+/// ignored and preserved only for ABI compatibility.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_createHC(_inputBuffer: *const c_char) -> *mut c_void {
     LZ4_createStreamHC() as *mut c_void
 }
 
+/// Deprecated: use `LZ4_freeStreamHC()` instead.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_freeHC(stream: *mut c_void) -> c_int {
     LZ4_freeStreamHC(stream as *mut LZ4StreamHC)
 }
 
+/// Deprecated: use `LZ4_saveDictHC()` instead.
+///
+/// Obsolete HC streaming helper preserved for ABI compatibility. As noted
+/// in upstream, this function truncates the history of the stream rather
+/// than preserving a window-sized chunk of history.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_slideInputBufferHC(stream: *mut c_void) -> *mut c_char {
     if stream.is_null() {
@@ -2329,6 +3056,10 @@ pub unsafe extern "C" fn LZ4_slideInputBufferHC(stream: *mut c_void) -> *mut c_c
     }
 }
 
+/// Deprecated: use `LZ4_initStreamHC()` instead.
+///
+/// Resets a user-provided HC state buffer; the `inputBuffer` argument is
+/// ignored. Returns 0 on success, non-zero if `state` is NULL.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_resetStreamStateHC(
     state: *mut c_void,
@@ -2341,11 +3072,19 @@ pub unsafe extern "C" fn LZ4_resetStreamStateHC(
     0
 }
 
+/// Allocate a streaming decompression tracking context.
+///
+/// A tracking context can be re-used multiple times. Release with
+/// `LZ4_freeStreamDecode()`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_createStreamDecode() -> *mut LZ4StreamDecode {
     Box::into_raw(Box::<DecodeStreamCtx>::default()) as *mut LZ4StreamDecode
 }
 
+/// Release a streaming decompression context previously allocated with
+/// `LZ4_createStreamDecode()`.
+///
+/// Returns 0; passing NULL is safe and treated as a no-op.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_freeStreamDecode(stream: *mut LZ4StreamDecode) -> c_int {
     if !stream.is_null() {
@@ -2354,6 +3093,15 @@ pub unsafe extern "C" fn LZ4_freeStreamDecode(stream: *mut LZ4StreamDecode) -> c
     0
 }
 
+/// Start decompression of a new stream of blocks on an
+/// `LZ4_streamDecode_t` context.
+///
+/// An `LZ4_streamDecode_t` context can be allocated once and re-used
+/// multiple times. A dictionary can optionally be set; use NULL or size 0
+/// for a reset. The dictionary is presumed stable: it must remain
+/// accessible and unmodified during the next decompression.
+///
+/// Returns 1 if OK, 0 if error.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_setStreamDecode(
     stream: *mut LZ4StreamDecode,
@@ -2373,6 +3121,30 @@ pub unsafe extern "C" fn LZ4_setStreamDecode(
     1
 }
 
+/// Decompress consecutive blocks in "streaming" mode.
+///
+/// The difference with the usual independent blocks is that new blocks are
+/// allowed to find references into former blocks. A block is an
+/// unsplittable entity and must be presented entirely to the
+/// decompression function. `LZ4_decompress_safe_continue()` only accepts
+/// one block at a time. It is modeled after `LZ4_decompress_safe()` and
+/// behaves similarly.
+///
+/// Returns the number of bytes decompressed into the destination buffer
+/// (necessarily <= `dstCapacity`). If the destination buffer is not large
+/// enough, decoding stops and a negative value is returned. If the source
+/// stream is detected malformed, the function stops decoding and returns
+/// a negative result.
+///
+/// The last 64 KB of previously decoded data _must_ remain available and
+/// unmodified at the memory position where they were previously decoded.
+/// If less than 64 KB has been decoded so far, all of it must be present.
+///
+/// If a ring buffer is used on the decompression side, see upstream
+/// `LZ4_decoderRingBufferSize()` documentation for the supported ring
+/// buffer arrangements. Whenever these conditions cannot be met, save the
+/// last 64 KB of decoded data into a safe buffer and pass it to
+/// `LZ4_setStreamDecode()` before decompressing the next block.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_decompress_safe_continue(
     stream: *mut LZ4StreamDecode,
@@ -2396,10 +3168,19 @@ pub unsafe extern "C" fn LZ4_decompress_safe_continue(
     }
 }
 
+/// Clamp the acceleration parameter to the upstream minimum of `1`, matching
+/// the `acceleration >= 1` invariant asserted in
+/// `LZ4_compress_generic_validated`.
 fn normalize_acceleration(acceleration: c_int) -> usize {
     cmp::max(acceleration, 1) as usize
 }
 
+/// Single-pass fast LZ4 block compressor without a dictionary. Mirrors upstream
+/// `LZ4_compress_generic_validated()` (lz4.c:926+) for the
+/// `outputDirective == notLimited`, `dictDirective == noDict` configuration:
+/// branches are decided at compile time and the function presumes valid input.
+/// Returns the number of compressed bytes written, or `None` if encoding could
+/// not fit in `dst`.
 fn compress_block(src: &[u8], dst: &mut [u8], acceleration: usize) -> Option<usize> {
     if src.is_empty() {
         return emit_last_literals(src, dst, 0, 0);
@@ -2495,6 +3276,12 @@ fn compress_block(src: &[u8], dst: &mut [u8], acceleration: usize) -> Option<usi
     }
 }
 
+/// Fast LZ4 block compressor under the `fillOutput` directive: writes as much
+/// of `src` as can fit into `dst` and returns `(consumed, written)`. Mirrors
+/// upstream `LZ4_compress_generic_validated(..., fillOutput, ...)` in lz4.c.
+/// In contrast to `compress_block`, encoding never simply bails on overflow:
+/// when the destination cannot hold the next sequence, the parser stops or
+/// truncates the trailing literals run.
 fn compress_dest_size(src: &[u8], dst: &mut [u8]) -> Option<(usize, usize)> {
     // Single-pass fillOutput compressor, mirroring upstream
     // `LZ4_compress_generic(..., fillOutput, ...)` (lz4.c:931+). The
@@ -2668,6 +3455,10 @@ fn compress_dest_size(src: &[u8], dst: &mut [u8]) -> Option<(usize, usize)> {
     Some(emit_truncated_last_literals(src, dst, anchor, op, olimit))
 }
 
+/// Emit a final-literals run for the `fillOutput` path, truncating the run if
+/// it would overflow the output buffer. Mirrors upstream's `_last_literals`
+/// fallback block (lz4.c:1298-1325) under the `fillOutput` directive. Returns
+/// `(consumed, written)`.
 fn emit_truncated_last_literals(
     src: &[u8],
     dst: &mut [u8],
@@ -2711,6 +3502,12 @@ fn emit_truncated_last_literals(
     (anchor + last_run, op)
 }
 
+/// Fast LZ4 block compressor with a preceding dictionary. Concatenates the
+/// (truncated to `LZ4_DISTANCE_MAX`) dictionary in front of `src` and runs the
+/// same parser as `compress_block`, mirroring upstream
+/// `LZ4_compress_generic_validated()` for the `dictDirective == withPrefix64k`
+/// configuration. The dictionary tail is seeded into the hash table before the
+/// main loop so backward matches can land inside it.
 fn compress_block_with_dict(
     src: &[u8],
     dst: &mut [u8],
@@ -2983,6 +3780,12 @@ impl MidTables {
     }
 }
 
+/// Fill the LZ4mid hash tables with references into the dictionary prefix.
+/// Mirrors upstream `LZ4MID_fillHTable()` (lz4hc.c:514): "the resulting table
+/// is only exploitable by LZ4MID (level 2)". The first pass strides by 3 and
+/// updates both `hash4` and `hash8`; the second pass dense-updates `hash8`
+/// over the most recent 32 KiB so short-distance matches near the prefix
+/// boundary still hit.
 fn fill_lz4mid_dict_table(table: &mut MidTables, full: &[u8], base: usize) {
     if base <= LZ4MID_HASHSIZE {
         return;
@@ -3006,10 +3809,17 @@ fn fill_lz4mid_dict_table(table: &mut MidTables, full: &[u8], base: usize) {
     }
 }
 
+/// LZ4mid (level 2) compressor without a dictionary. Trampolines into
+/// `compress_block_lz4mid_with_base` with `base == 0`.
 fn compress_block_lz4mid(src: &[u8], dst: &mut [u8]) -> Option<usize> {
     compress_block_lz4mid_with_base(src, dst, 0)
 }
 
+/// LZ4mid (level 2) block compressor. Mirrors upstream `LZ4MID_compress()`
+/// (lz4hc.c:554+): a two-table (hash4 + hash8) parser that probes the longer
+/// hash first, optionally peeks one position ahead, and adopts the better
+/// match. `base` is the offset inside `full` where the input to be emitted
+/// starts; `full[..base]` is retained dictionary prefix (or empty).
 fn compress_block_lz4mid_with_base(full: &[u8], dst: &mut [u8], base: usize) -> Option<usize> {
     let src_len = full.len().checked_sub(base)?;
     if src_len == 0 {
@@ -3122,6 +3932,11 @@ fn compress_block_lz4mid_with_base(full: &[u8], dst: &mut [u8], base: usize) -> 
     emit_last_literals_with_base(full, dst, base, anchor, op)
 }
 
+/// HC block compressor entry point without a dictionary. Mirrors upstream
+/// `LZ4HC_compress_generic_internal()` (lz4hc.c:1419+): dispatches to the
+/// LZ4mid strategy at levels 1-2, the optimal parser at levels 10-12, and the
+/// hash-chain parser otherwise. `compression_level` is normalized via
+/// `normalize_hc_level` so out-of-range values map to upstream defaults.
 fn compress_block_hc(
     src: &[u8],
     dst: &mut [u8],
@@ -3333,6 +4148,11 @@ fn compress_block_hc_hashchain(
     emit_last_literals_with_base(full, dst, base, anchor, op)
 }
 
+/// HC block compressor with a preceding dictionary. Concatenates the
+/// (truncated to `LZ4_DISTANCE_MAX`) dictionary in front of `src` and
+/// dispatches to the matching HC strategy (LZ4mid / hash-chain / optimal),
+/// mirroring upstream `LZ4HC_compress_generic_internal()` with
+/// `dictDirective == usingDictCtx`/`usingExtDict`.
 fn compress_block_hc_with_dict(
     src: &[u8],
     dst: &mut [u8],
@@ -3363,6 +4183,14 @@ fn compress_block_hc_with_dict(
     compress_block_hc_hashchain(&full, dst, base, compression_level)
 }
 
+/// HC optimal parser (levels 10-12). Mirrors upstream `LZ4HC_compress_optimal`
+/// (lz4hc.c:1879+): builds a forward-DP `opt[]` table of best-price
+/// (literal, match) decisions over a sliding window of up to `LZ4_OPT_NUM`
+/// positions, then traces back to emit the chosen sequences. `base` is the
+/// offset inside `full` where the input to be emitted starts; `full[..base]`
+/// is retained dictionary prefix (or empty). `favor_dec_speed` enables the
+/// upstream `favorDecompressionSpeed` shortcut that biases matching towards
+/// faster decode at a small ratio cost.
 fn compress_block_hc_optimal(
     full: &[u8],
     dst: &mut [u8],
@@ -3694,6 +4522,9 @@ fn compress_block_hc_optimal(
     emit_last_literals_with_base(full, dst, base, anchor, op)
 }
 
+/// Compress a single frame-format block under the given preferences. Selects
+/// HC (with or without dictionary) when `prefs.compression_level > 0`, and the
+/// fast LZ4 block compressor otherwise. Used by the frame-format encoder.
 fn compress_frame_block(
     src: &[u8],
     dst: &mut [u8],
@@ -3715,6 +4546,9 @@ fn compress_frame_block(
     }
 }
 
+/// Clamp an HC compression level to `[1, LZ4HC_CLEVEL_MAX]`; non-positive
+/// values map to `LZ4HC_CLEVEL_DEFAULT`. Mirrors upstream's `LZ4HC_CLEVEL_*`
+/// validation in `LZ4HC_compress_generic_internal`.
 fn normalize_hc_level(compression_level: c_int) -> c_int {
     if compression_level < 1 {
         LZ4HC_CLEVEL_DEFAULT
@@ -3723,6 +4557,8 @@ fn normalize_hc_level(compression_level: c_int) -> c_int {
     }
 }
 
+/// Per-level `nbSearches` budget for the HC parser. Mirrors the `nbSearches`
+/// column of upstream's `LZ4HC_getCLevelParams` table (lz4hc.c).
 fn hc_search_attempts(compression_level: c_int) -> usize {
     let level = normalize_hc_level(compression_level);
     match level {
@@ -3740,6 +4576,9 @@ fn hc_search_attempts(compression_level: c_int) -> usize {
     }
 }
 
+/// Per-level `targetLength` (sufficient match length) used by the HC optimal
+/// parser to short-circuit further searching. Mirrors the `targetLength`
+/// column of upstream's `LZ4HC_getCLevelParams` table.
 fn hc_target_length(compression_level: c_int) -> usize {
     match normalize_hc_level(compression_level) {
         10 => 64,
@@ -3749,6 +4588,10 @@ fn hc_target_length(compression_level: c_int) -> usize {
     }
 }
 
+/// Byte cost of a literals run of length `lit_len` in the LZ4 wire format.
+/// Mirrors upstream `LZ4HC_literalsPrice` (lz4hc.c:1827): each literal byte
+/// costs 1, plus one extra byte for entering the variable-length encoding at
+/// `lit_len >= RUN_MASK` and one further byte per 255-byte chunk.
 #[inline(always)]
 fn hc_literals_price(lit_len: usize) -> u32 {
     let mut price = lit_len as u32;
@@ -3758,6 +4601,10 @@ fn hc_literals_price(lit_len: usize) -> u32 {
     price
 }
 
+/// Byte cost of an encoded (literals, match) sequence. Mirrors upstream
+/// `LZ4HC_sequencePrice` (lz4hc.c:1837): one token byte, two offset bytes,
+/// the literals price, and any extension bytes for matches beyond
+/// `ML_MASK + MINMATCH`.
 #[inline(always)]
 fn hc_sequence_price(lit_len: usize, match_len: usize) -> u32 {
     let mut price = 1 + 2 + hc_literals_price(lit_len);
@@ -3767,6 +4614,12 @@ fn hc_sequence_price(lit_len: usize, match_len: usize) -> u32 {
     price
 }
 
+/// HC `fillOutput`-style compressor: returns the largest `(consumed, written)`
+/// pair such that the HC encoder fits inside `dst`. Unlike the fast block path
+/// (`compress_dest_size`), upstream HC does not have a single-pass fillOutput
+/// implementation, so we binary-search over prefixes of `src` and keep the
+/// best fit. Used by `LZ4F_compressFrame` / streaming HC when only a bounded
+/// output buffer is available.
 fn compress_hc_dest_size(
     src: &[u8],
     dst: &mut [u8],
@@ -3808,6 +4661,9 @@ fn compress_hc_dest_size(
     Some((consumed, written))
 }
 
+/// HC `fillOutput`-style compressor with a preceding dictionary. Same prefix
+/// binary search as `compress_hc_dest_size`, but each candidate call routes
+/// through `compress_block_hc_with_dict` so the dictionary is in scope.
 fn compress_hc_dest_size_with_dict(
     src: &[u8],
     dst: &mut [u8],
@@ -3852,6 +4708,10 @@ fn compress_hc_dest_size_with_dict(
     Some((consumed, written))
 }
 
+/// Append freshly-compressed input to the HC streaming dictionary, dropping
+/// from the front so the retained tail never exceeds `LZ4_DISTANCE_MAX` —
+/// matching upstream's sliding-window behavior in `LZ4_loadDictHC` /
+/// `LZ4HC_setExternalDict`.
 fn append_hc_dictionary(dictionary: &mut Vec<u8>, src: &[u8]) {
     dictionary.extend_from_slice(src);
     if dictionary.len() > LZ4_DISTANCE_MAX {
@@ -3864,6 +4724,11 @@ const HC_FLAG_PATTERN_ANALYSIS: u32 = 1 << 0;
 const HC_FLAG_CHAIN_SWAP: u32 = 1 << 1;
 const HC_FLAG_FAVOR_DEC_SPEED: u32 = 1 << 2;
 
+/// Insert positions up to `ip` into the HC chain and return the best forward
+/// match starting at `ip`. Mirrors upstream `LZ4HC_InsertAndFindBestMatch`
+/// (lz4hc.c:1139): pins `iLowLimit == ip`, disables chain swapping, and
+/// enables pattern analysis only when the search budget exceeds 128 (levels
+/// 9+). Used by the plain HC hash-chain parser.
 fn find_hc_match(
     src: &[u8],
     table: &mut HcTables,
@@ -3888,6 +4753,11 @@ fn find_hc_match(
     )
 }
 
+/// Match-finder used by the HC optimal parser: returns the best forward match
+/// at `ip` that strictly exceeds `min_len`, or `len == 0` if none was found.
+/// Mirrors upstream `LZ4HC_FindLongerMatch` (lz4hc.c:1851): always enables
+/// pattern analysis and chain-swap, and applies the `favorDecSpeed` shortcut
+/// that clamps match lengths in the `(18, 36]` band down to 18.
 #[inline(always)]
 fn find_hc_longer_match(
     src: &[u8],
@@ -3928,6 +4798,12 @@ fn find_hc_longer_match(
     }
 }
 
+/// Core HC match finder. Mirrors upstream `LZ4HC_InsertAndGetWiderMatch`
+/// (lz4hc.c:914+): walks the hash chain backwards from `ip` for up to
+/// `max_attempts` steps, optionally allowing matches that start before `ip`
+/// (i.e. `iLowLimit < ip`) so the parser can lengthen an earlier match. The
+/// `flags` bitmask selects pattern analysis, chain swap, and the
+/// `favorDecompressionSpeed` shortcut that skips matches with offset < 8.
 #[inline(always)]
 fn find_hc_wider_match(
     src: &[u8],
@@ -4143,11 +5019,19 @@ fn find_hc_wider_match(
     best
 }
 
+/// Returns `true` if `pattern` (a 4-byte sample) is a repetition of a 1- or
+/// 2-byte unit. Used by the HC parser to gate the pattern-analysis fast path,
+/// matching upstream's `LZ4HC_countPattern` precondition that the pattern is
+/// a length-1, length-2, or length-4 repeat (but not length-3).
 #[inline(always)]
 fn is_repeated_pattern(pattern: u32) -> bool {
     (pattern & 0xffff) == (pattern >> 16) && (pattern & 0xff) == (pattern >> 24)
 }
 
+/// Forward-count bytes in `src` starting at `pos` that continue a repeated
+/// pattern. Mirrors upstream `LZ4HC_countPattern` (lz4hc.c:851): `pattern`
+/// must be a length-1, length-2, or length-4 repeat. Returns the number of
+/// matching bytes (capped at `limit - pos`).
 #[inline]
 fn count_pattern(src: &[u8], mut pos: usize, limit: usize, pattern: u32) -> usize {
     let byte = pattern as u8;
@@ -4158,13 +5042,13 @@ fn count_pattern(src: &[u8], mut pos: usize, limit: usize, pattern: u32) -> usiz
     pos - start
 }
 
+/// Backward-count bytes preceding `pos` that continue a repeated pattern.
+/// Mirrors upstream `LZ4HC_reverseCountPattern` (lz4hc.c:884): `pattern` must
+/// be a length-1, length-2, or length-4 repeat, read using natural platform
+/// endianness. The bulk loop reads 4 bytes at a time, which is correct for
+/// length-4 repeats (e.g. `0xAABBCCDD`) where a per-byte walk would miss
+/// matches that align on 4-byte boundaries.
 fn reverse_count_pattern(src: &[u8], mut pos: usize, low_limit: usize, pattern: u32) -> usize {
-    // Mirrors upstream `LZ4HC_reverseCountPattern` (lz4hc.c:884). The pattern
-    // is sampled from a length-1, length-2, or length-4 repeat (per upstream's
-    // contract), so reading 4 bytes at a time is correct for length-4 repeats
-    // (e.g. `0xAABBCCDD`) where a per-byte walk would miss matches that align
-    // on 4-byte boundaries. The byte tail then walks indices 3..0 of the
-    // pattern in turn.
     let start = pos;
     // Upstream takes `(BYTE*)(&pattern) + 3` then walks down — i.e. the byte
     // at the highest memory address of the u32, regardless of host endianness.
@@ -4191,6 +5075,11 @@ fn reverse_count_pattern(src: &[u8], mut pos: usize, low_limit: usize, pattern: 
     start - pos
 }
 
+/// Count the number of bytes matching immediately *before* `ip` and
+/// `candidate`. Mirrors upstream `LZ4HC_countBack` (lz4hc.c:202) but returns a
+/// positive count rather than the negative offset upstream produces. The
+/// 8-byte SWAR step uses `leading_zeros / 8` to locate the first differing
+/// byte from the high end of the loaded word.
 #[inline(always)]
 fn count_back(src: &[u8], ip: usize, candidate: usize, low_limit: usize) -> usize {
     let mut back = 0usize;
@@ -4215,6 +5104,10 @@ fn count_back(src: &[u8], ip: usize, candidate: usize, low_limit: usize) -> usiz
     back
 }
 
+/// Count the number of bytes matching forward from `ip` and `match_pos`,
+/// stopping at `limit`. Mirrors upstream `LZ4_count` (lz4.c:676): the bulk
+/// loop reads 8 bytes at a time and locates the first differing byte via
+/// `trailing_zeros / 8`, then a tail walk handles the final 0-7 bytes.
 #[inline(always)]
 fn count_match(src: &[u8], mut ip: usize, mut match_pos: usize, limit: usize) -> usize {
     let start = ip;
@@ -4236,6 +5129,11 @@ fn count_match(src: &[u8], mut ip: usize, mut match_pos: usize, limit: usize) ->
     ip - start
 }
 
+/// Emit one (literals, offset, match-length) sequence into `dst`. Mirrors
+/// upstream `LZ4HC_encodeSequence` (lz4hc.c:292): writes the token byte, any
+/// literal-length extension bytes, the literal payload, the 16-bit little-
+/// endian offset, and any match-length extension bytes. Returns the new write
+/// cursor, or `None` if the sequence would overflow `dst`.
 #[inline(always)]
 fn encode_sequence(
     src: &[u8],
@@ -4269,6 +5167,10 @@ fn encode_sequence(
     emit_len(dst, op, ml_code, 15)
 }
 
+/// Emit the trailing literals run (token + variable-length literal-length
+/// extension + payload) that terminates an LZ4 block. Mirrors upstream's
+/// `_last_literals` exit block (lz4.c:1298+) under the `notLimited` directive.
+/// Returns the final output cursor, or `None` if `dst` cannot fit the run.
 fn emit_last_literals(src: &[u8], dst: &mut [u8], anchor: usize, mut op: usize) -> Option<usize> {
     let lit_len = src.len() - anchor;
     if op >= dst.len() {
@@ -4285,6 +5187,11 @@ fn emit_last_literals(src: &[u8], dst: &mut [u8], anchor: usize, mut op: usize) 
     Some(op + lit_len)
 }
 
+/// Variant of `emit_last_literals` that accounts for a `base` offset inside
+/// `full` (i.e. `full[..base]` is dictionary history that should not appear in
+/// the literal payload). Used by the dict-aware compressors so the trailing
+/// literals are read from the prefix-relative range, mirroring upstream's
+/// pointer arithmetic when `dictDirective != noDict`.
 fn emit_last_literals_with_base(
     full: &[u8],
     dst: &mut [u8],
@@ -4312,6 +5219,11 @@ fn emit_last_literals_with_base(
     Some(op + lit_len)
 }
 
+/// Emit the variable-length extension bytes for a literals or match-length
+/// run, mirroring the inline encoding upstream uses inside
+/// `LZ4HC_encodeSequence` and `LZ4_compress_generic_validated`: while
+/// `len >= base`, write `0xFF` bytes for each 255 chunk and then the residue
+/// `(len - base) % 255`. `base` is the inline-token cap (`RUN_MASK = 15`).
 fn emit_len(dst: &mut [u8], mut op: usize, len: usize, base: usize) -> Option<usize> {
     if len >= base {
         let mut extra = len - base;
@@ -4375,6 +5287,13 @@ fn read_len_fast(src: &[u8], ip: &mut usize) -> Option<usize> {
     }
 }
 
+/// Decompress a single LZ4 block (no dictionary). Returns the number of bytes
+/// written, or `None` on malformed input.
+///
+/// Mirrors the fast-path of upstream `LZ4_decompress_generic` (lz4.c:2071+,
+/// the `LZ4_FAST_DEC_LOOP` variant) — wild-copies 32 bytes at a time as long
+/// as both input and output have enough headroom, falling through to the
+/// safe tail loop (`decompress_block_safe`) when room runs out.
 #[inline]
 fn decompress_block(src: &[u8], dst: &mut [u8]) -> Option<usize> {
     let oend = dst.len();
@@ -4486,6 +5405,12 @@ fn decompress_block(src: &[u8], dst: &mut [u8]) -> Option<usize> {
     decompress_block_safe(src, dst, ip, op)
 }
 
+/// Safe (bounds-checking) tail of single-block decompression. Called either
+/// directly for tiny outputs or as the fallback when `decompress_block` runs
+/// out of fast-loop headroom. `ip`/`op` are the input/output positions where
+/// the fast loop left off.
+///
+/// Mirrors the safe-tail of upstream `LZ4_decompress_generic` (lz4.c).
 #[inline]
 fn decompress_block_safe(
     src: &[u8],
@@ -4526,6 +5451,10 @@ fn decompress_block_safe(
     Some(op)
 }
 
+/// Decompress a single LZ4 block whose match offsets may reach back into an
+/// external `dict` buffer (linked blocks / external dictionary mode).
+///
+/// Mirrors upstream `LZ4_decompress_generic` (lz4.c) with `dict == usingExtDict`.
 #[inline]
 fn decompress_block_with_dict(src: &[u8], dst: &mut [u8], dict: &[u8]) -> Option<usize> {
     let mut ip = 0usize;
@@ -4561,10 +5490,19 @@ fn decompress_block_with_dict(src: &[u8], dst: &mut [u8], dict: &[u8]) -> Option
     Some(op)
 }
 
+/// Partial-decompression entry point: stop after producing exactly `target`
+/// bytes of output (or earlier if the block ends).
+///
+/// Mirrors upstream `LZ4_decompress_safe_partial` (lz4.c) with no dictionary.
 fn decompress_block_partial(src: &[u8], dst: &mut [u8], target: usize) -> Option<usize> {
     decompress_block_partial_with_dict(src, dst, target, &[])
 }
 
+/// Partial-decompression with external dictionary support. Stops once `target`
+/// output bytes have been written; mid-sequence literals/matches are truncated
+/// rather than failing.
+///
+/// Mirrors upstream `LZ4_decompress_safe_partial_usingDict` (lz4.c).
 fn decompress_block_partial_with_dict(
     src: &[u8],
     dst: &mut [u8],
@@ -4616,6 +5554,13 @@ fn decompress_block_partial_with_dict(
     Some(op)
 }
 
+/// Decompress until exactly `dst.len()` output bytes have been produced (i.e.
+/// the caller knows the exact uncompressed size up front), reading from an
+/// unbounded `*const u8` input. Returns the number of input bytes consumed.
+///
+/// Mirrors upstream `LZ4_decompress_fast` / `LZ4_decompress_fast_usingDict`
+/// (lz4.c): the "exact output size" entry points that have no input length
+/// limit and rely on the output size as the loop terminator.
 fn decompress_block_exact_ptr(src: *const u8, dst: &mut [u8], dict: &[u8]) -> Option<usize> {
     let mut ip = 0usize;
     let mut op = 0usize;
@@ -4650,6 +5595,11 @@ fn decompress_block_exact_ptr(src: *const u8, dst: &mut [u8], dict: &[u8]) -> Op
     Some(ip)
 }
 
+/// Variable-length integer reader for the unbounded-input decode path: no
+/// length check on `src` because the caller guarantees enough room.
+///
+/// Mirrors upstream `read_variable_length` (lz4.c:1975) without the
+/// `ilimit` check, as used by `LZ4_decompress_fast`.
 fn read_len_ptr(src: *const u8, ip: &mut usize, mut len: usize) -> Option<usize> {
     if len == 15 {
         loop {
@@ -4664,6 +5614,13 @@ fn read_len_ptr(src: *const u8, ip: &mut usize, mut len: usize) -> Option<usize>
     Some(len)
 }
 
+/// Copy a back-reference of `len` bytes ending at `*op` from `offset` bytes
+/// behind, possibly reaching back into the external `dict`. Handles the
+/// overlapping match case (offset < len) by doubling the copied prefix until
+/// `len` bytes are written.
+///
+/// Mirrors upstream's match-copy path in `LZ4_decompress_generic` (lz4.c)
+/// when `usingExtDict` is set.
 #[inline]
 fn copy_match(
     dst: &mut [u8],
@@ -4731,6 +5688,12 @@ fn copy_match(
     Some(())
 }
 
+/// Copy a back-reference within `dst` (no external dictionary). Handles the
+/// overlapping match case by doubling the copied prefix until `len` bytes
+/// are written.
+///
+/// Mirrors the in-block match-copy path of upstream `LZ4_decompress_generic`
+/// (lz4.c) when `dict == noDict`.
 #[inline]
 fn copy_match_no_dict(dst: &mut [u8], op: &mut usize, offset: usize, mut len: usize) -> Option<()> {
     if offset == 0 || offset > *op || *op + len > dst.len() {
@@ -4759,6 +5722,12 @@ fn copy_match_no_dict(dst: &mut [u8], op: &mut usize, offset: usize, mut len: us
     Some(())
 }
 
+/// Variable-length integer reader: if the upper-nibble `len` token was the
+/// max value (15), read additional 0xFF-terminated bytes from `src[*ip..]`
+/// and accumulate. Returns `None` if input is truncated or the accumulator
+/// would overflow.
+///
+/// Mirrors upstream `read_variable_length` (lz4.c:1975).
 #[inline]
 fn read_len(src: &[u8], ip: &mut usize, mut len: usize) -> Option<usize> {
     if len == 15 {
@@ -4777,6 +5746,11 @@ fn read_len(src: &[u8], ip: &mut usize, mut len: usize) -> Option<usize> {
     Some(len)
 }
 
+/// Compute the hash table index for the bytes at `src[pos..]`. On 64-bit
+/// platforms uses the 5-byte hash; on 32-bit uses the 4-byte hash. `by_u16`
+/// requests the `byU16` table type (extra bit of hash, smaller table).
+///
+/// Mirrors upstream `LZ4_hashPosition` (lz4.c:793).
 fn hash_fast(src: &[u8], pos: usize, by_u16: bool) -> usize {
     if by_u16 {
         hash4_bits(src, pos, LZ4_HASH_BITS_U16)
@@ -4788,25 +5762,41 @@ fn hash_fast(src: &[u8], pos: usize, by_u16: bool) -> usize {
     }
 }
 
+/// Knuth-multiplicative hash of the 4-byte window at `src[pos..]` into a
+/// `bits`-bit table index.
+///
+/// Mirrors upstream `LZ4_hash4` (lz4.c:773).
 fn hash4_bits(src: &[u8], pos: usize, bits: usize) -> usize {
     let v = read_u32(&src[pos..]);
     ((v.wrapping_mul(2_654_435_761)) >> (32 - bits)) as usize
 }
 
+/// 4-byte hash sized for the LZ4HC match-finder table.
+///
+/// Mirrors upstream `LZ4HC_hashPtr` (lz4hc.c) — same `2_654_435_761`
+/// multiplier as `LZ4_hash4` but shifted to `LZ4HC_HASH_BITS`.
 fn hash4_hc(src: &[u8], pos: usize) -> usize {
     let v = read_u32(&src[pos..]);
     ((v.wrapping_mul(2_654_435_761)) >> (32 - LZ4HC_HASH_BITS)) as usize
 }
 
+/// 4-byte hash sized for the LZ4MID (medium-compression) hash table.
 fn hash4_mid(src: &[u8], pos: usize) -> usize {
     hash4_bits(src, pos, LZ4MID_HASH_BITS)
 }
 
+/// 8-byte hash sized for the LZ4MID secondary table, using a 64-bit prime
+/// multiplier on the upper bits of the window.
+///
+/// Mirrors upstream `LZ4MID_hash8` (lz4.c).
 fn hash8_mid(src: &[u8], pos: usize) -> usize {
     let v = read_u64(&src[pos..]);
     (((v << 8).wrapping_mul(58_295_818_150_454_627)) >> (64 - LZ4MID_HASH_BITS)) as usize
 }
 
+/// Convert a caller-supplied `LZ4F_preferences_t` C struct into our internal
+/// `FramePrefs`. A null pointer yields default preferences (matches upstream
+/// behavior, which accepts `NULL` as "use defaults").
 fn preferences_from_ptr(ptr: *const LZ4FPreferences) -> FramePrefs {
     if ptr.is_null() {
         return FramePrefs::default();
@@ -4838,6 +5828,12 @@ fn preferences_from_ptr(ptr: *const LZ4FPreferences) -> FramePrefs {
     }
 }
 
+/// Serialize the LZ4 frame header (magic + FLG/BD + optional content size +
+/// optional dictID + header checksum byte) for the given `prefs`. The output
+/// is between 7 and 19 bytes.
+///
+/// Mirrors the header-serialization portion of upstream `LZ4F_compressBegin`
+/// (lz4frame.c).
 fn frame_header(prefs: FramePrefs) -> Vec<u8> {
     let mut out = Vec::with_capacity(19);
     out.extend_from_slice(&LZ4F_MAGIC);
@@ -4870,6 +5866,12 @@ fn frame_header(prefs: FramePrefs) -> Vec<u8> {
     out
 }
 
+/// Parse an LZ4 frame header. On success returns the decoded preferences and
+/// the number of header bytes consumed. Returns an `LZ4F_errorCodes` value on
+/// failure (bad magic, reserved flag set, invalid block size id, bad header
+/// checksum, etc.).
+///
+/// Mirrors upstream `LZ4F_decodeHeader` (lz4frame.c).
 fn parse_frame_header(src: &[u8]) -> Result<(FramePrefs, usize), usize> {
     if src.len() < 7 || src[..4] != LZ4F_MAGIC {
         return if src.len() >= 4 && src[..4] != LZ4F_MAGIC {
@@ -4934,6 +5936,11 @@ fn parse_frame_header(src: &[u8]) -> Result<(FramePrefs, usize), usize> {
     ))
 }
 
+/// Returns true if the first 4 bytes of `src` are a skippable-frame magic
+/// number (`0x184D2A50` .. `0x184D2A5F`).
+///
+/// Mirrors the skippable-frame detection in upstream `LZ4F_decompress`
+/// (lz4frame.c).
 fn is_skippable_magic_prefix(src: &[u8]) -> bool {
     if src.len() < 4 {
         return false;
@@ -4942,6 +5949,9 @@ fn is_skippable_magic_prefix(src: &[u8]) -> bool {
     (LZ4F_SKIPPABLE_MAGIC_MIN..=LZ4F_SKIPPABLE_MAGIC_MAX).contains(&magic)
 }
 
+/// Total byte length (header + payload) of the skippable frame that starts
+/// at `src`. Returns `None` if `src` does not begin with a skippable magic
+/// or is too short to read the 32-bit length field.
 fn parse_skippable_frame_len(src: &[u8]) -> Option<usize> {
     if src.len() < 8 || !is_skippable_magic_prefix(src) {
         return None;
@@ -4950,6 +5960,13 @@ fn parse_skippable_frame_len(src: &[u8]) -> Option<usize> {
     content_len.checked_add(8)
 }
 
+/// Try to consume a frame (or skippable) header from `ctx.input`. Returns
+/// `Ok(true)` if a header was parsed (and `ctx.parsed_header` updated) or
+/// the frame was a complete skippable, `Ok(false)` if more input is needed,
+/// and an error code on malformed input.
+///
+/// Mirrors the header-parsing stage of upstream `LZ4F_decompress`
+/// (lz4frame.c, `dstage_getFrameHeader` / `dstage_storeFrameHeader`).
 fn parse_frame_header_if_available(ctx: &mut DecompressionCtx) -> Result<bool, usize> {
     if ctx.done || ctx.parsed_header {
         return Ok(true);
@@ -4986,6 +6003,9 @@ fn parse_frame_header_if_available(ctx: &mut DecompressionCtx) -> Result<bool, u
     Ok(true)
 }
 
+/// Copy parsed frame preferences into the decompression context and reset
+/// per-frame state (content checksum running total, block dictionary if no
+/// external dictionary was set, etc.).
 fn apply_frame_prefs(ctx: &mut DecompressionCtx, prefs: FramePrefs) {
     ctx.parsed_header = true;
     ctx.block_checksum = prefs.block_checksum;
@@ -5001,6 +6021,10 @@ fn apply_frame_prefs(ctx: &mut DecompressionCtx, prefs: FramePrefs) {
     ctx.external_dictionary = false;
 }
 
+/// Reconstruct an `LZ4F_frameInfo_t` C struct from the current decompression
+/// context state, for callers of `LZ4F_getFrameInfo`.
+///
+/// Mirrors upstream `LZ4F_getFrameInfo` (lz4frame.c).
 fn frame_info_from_decompression_ctx(ctx: &DecompressionCtx) -> LZ4FFrameInfo {
     LZ4FFrameInfo {
         block_size_id: match ctx.block_max {
@@ -5030,6 +6054,15 @@ fn frame_info_from_decompression_ctx(ctx: &DecompressionCtx) -> LZ4FFrameInfo {
     }
 }
 
+/// Decode the next frame block from `ctx.input` directly into `dst`,
+/// avoiding the staging `ctx.pending` buffer. Returns:
+/// - `None` when more input is needed, when `dst` is too small to receive a
+///   worst-case block, or when there is pending output not yet consumed.
+/// - `Some(Ok(written))` on a successful block decode (or end-of-frame, with
+///   `written = 0`).
+/// - `Some(Err(code))` on malformed input.
+///
+/// Mirrors the in-place fast path of upstream `LZ4F_decompress` (lz4frame.c).
 fn try_decompress_frame_block_to_dst(
     ctx: &mut DecompressionCtx,
     dst: &mut [u8],
@@ -5144,6 +6177,14 @@ fn try_decompress_frame_block_to_dst(
     Some(Ok(written))
 }
 
+/// Variant of `try_decompress_frame_block_to_dst` that reads a single block
+/// from the caller-provided `src` slice (rather than from `ctx.input`),
+/// returning `(input_consumed, output_written)` on success. Used when the
+/// caller wants to drive decompression block-at-a-time without accumulating
+/// input inside the context.
+///
+/// Mirrors the in-place block-decompression path of upstream `LZ4F_decompress`
+/// (lz4frame.c).
 fn try_decompress_frame_block_slice_to_dst(
     ctx: &mut DecompressionCtx,
     src: &[u8],
@@ -5234,6 +6275,13 @@ fn try_decompress_frame_block_slice_to_dst(
     Some(Ok((4 + block_len + checksum_len, written)))
 }
 
+/// Drain as much of `ctx.input` as possible into `ctx.pending`, parsing the
+/// frame header if not yet done and then decoding whole blocks until either
+/// input runs out, output is produced (and must be consumed by the caller
+/// before more is generated), or the end-of-frame marker is reached.
+///
+/// Mirrors the staged decompression loop of upstream `LZ4F_decompress`
+/// (lz4frame.c).
 fn parse_available_frame(ctx: &mut DecompressionCtx) -> Result<(), usize> {
     if ctx.done {
         return Ok(());
@@ -5341,14 +6389,20 @@ fn parse_available_frame(ctx: &mut DecompressionCtx) -> Result<(), usize> {
     }
 }
 
+/// Number of decoded bytes still queued in `ctx.pending` waiting to be
+/// handed back to the caller.
 fn pending_len(ctx: &DecompressionCtx) -> usize {
     ctx.pending.len().saturating_sub(ctx.pending_pos)
 }
 
+/// True if there is no decoded output queued in `ctx.pending`.
 fn pending_is_empty(ctx: &DecompressionCtx) -> bool {
     pending_len(ctx) == 0
 }
 
+/// Drop the already-consumed prefix of `ctx.input`, shifting any remaining
+/// buffered bytes to the front so the buffer doesn't grow unboundedly across
+/// streaming calls.
 fn compact_input(ctx: &mut DecompressionCtx) {
     if ctx.pos > 0 {
         if ctx.pos >= ctx.input.len() {
@@ -5360,6 +6414,9 @@ fn compact_input(ctx: &mut DecompressionCtx) {
     }
 }
 
+/// Compute how many bytes of the current `LZ4F_decompress` call's input
+/// have been consumed: all of it while still mid-frame, but only up to the
+/// frame-end marker when `done` is set so callers can detect trailing data.
 fn consumed_from_call(done: bool, src_size: usize, remaining_input_len: usize) -> usize {
     if !done {
         return src_size;
@@ -5368,6 +6425,10 @@ fn consumed_from_call(done: bool, src_size: usize, remaining_input_len: usize) -
     src_size.saturating_sub(remaining_from_call)
 }
 
+/// Given the first few bytes of a frame, compute the full header length
+/// (7 base bytes plus 8 if content-size is present plus 4 if dictID is
+/// present). Returns `None` if the magic doesn't match or the FLG byte is
+/// not yet available.
 fn expected_frame_header_len(src: &[u8]) -> Option<usize> {
     if src.len() < 5 || src[..4] != LZ4F_MAGIC {
         return None;
@@ -5383,6 +6444,12 @@ fn expected_frame_header_len(src: &[u8]) -> Option<usize> {
     Some(len)
 }
 
+/// The "size hint" returned by `LZ4F_decompress`: a lower bound on how much
+/// more input the decoder needs to make progress (parse the rest of the
+/// header, finish the current block, or read the next block header).
+///
+/// Mirrors the `nextSrcSizeHint` return value of upstream `LZ4F_decompress`
+/// (lz4frame.c).
 fn frame_hint(ctx: &DecompressionCtx) -> usize {
     if !ctx.parsed_header {
         let available = ctx.input.len().saturating_sub(ctx.pos);
@@ -5410,6 +6477,8 @@ fn frame_hint(ctx: &DecompressionCtx) -> usize {
     }
 }
 
+/// Map the 4..=7 BD-byte block-size id to its `BlockSize` enum variant.
+/// Unknown ids fall back to `Max64KB` to match upstream's permissive default.
 fn block_size_enum(id: u8) -> BlockSize {
     match id {
         5 => BlockSize::Max256KB,
@@ -5419,6 +6488,8 @@ fn block_size_enum(id: u8) -> BlockSize {
     }
 }
 
+/// Maximum uncompressed block size in bytes for a given BD-byte block-size
+/// id (4 → 64 KiB, 5 → 256 KiB, 6 → 1 MiB, 7 → 4 MiB).
 fn block_max_size(id: u8) -> usize {
     match id {
         5 => 256 * 1024,
@@ -5428,6 +6499,10 @@ fn block_max_size(id: u8) -> usize {
     }
 }
 
+/// One-shot XXH32 hash of `input` with the given seed. Used for the frame
+/// header checksum byte, the per-block checksum, and the content checksum.
+///
+/// Mirrors upstream `XXH32` (xxhash.c).
 fn xxhash32(input: &[u8], seed: u32) -> u32 {
     let mut h = XxHash32::new(seed);
     h.update(input);
@@ -5538,37 +6613,55 @@ impl XxHash32 {
     }
 }
 
+/// XXH32 mixing round: `acc = ROTL((acc + input*PRIME32_2), 13) * PRIME32_1`.
+///
+/// Mirrors upstream `XXH32_round` (xxhash.c:269).
 fn round(acc: u32, input: u32) -> u32 {
     acc.wrapping_add(input.wrapping_mul(0x85EB_CA77))
         .rotate_left(13)
         .wrapping_mul(0x9E37_79B1)
 }
 
+/// Little-endian unaligned 32-bit load from the start of `input`.
+///
+/// Mirrors upstream `LZ4_read32` / `LZ4_readLE32` (lz4.c:380).
 #[inline]
 fn read_u32(input: &[u8]) -> u32 {
     unsafe { ptr::read_unaligned(input.as_ptr() as *const u32).to_le() }
 }
 
+/// Little-endian unaligned 16-bit load from the start of `input`.
+///
+/// Mirrors upstream `LZ4_read16` / `LZ4_readLE16` (lz4.c:379).
 #[inline]
 fn read_u16(input: &[u8]) -> u16 {
     unsafe { ptr::read_unaligned(input.as_ptr() as *const u16).to_le() }
 }
 
+/// Pointer-based variant of `read_u16` for callers operating on raw
+/// `*const u8` (no slice length to check).
 #[inline]
 fn read_u16_ptr(input: *const u8) -> u16 {
     unsafe { ptr::read_unaligned(input as *const u16).to_le() }
 }
 
+/// Pointer-based variant of `read_u32` for callers operating on raw
+/// `*const u8` (no slice length to check).
 #[inline]
 fn read_u32_ptr(input: *const u8) -> u32 {
     unsafe { ptr::read_unaligned(input as *const u32).to_le() }
 }
 
+/// Little-endian unaligned 64-bit load from the start of `input`.
+///
+/// Mirrors upstream `LZ4_read_ARCH` (lz4.c:381) on 64-bit targets.
 #[inline]
 fn read_u64(input: &[u8]) -> u64 {
     unsafe { ptr::read_unaligned(input.as_ptr() as *const u64).to_le() }
 }
 
+/// Pointer-based variant of `read_u64` for callers operating on raw
+/// `*const u8` (no slice length to check).
 #[inline]
 fn read_u64_ptr(input: *const u8) -> u64 {
     unsafe { ptr::read_unaligned(input as *const u64).to_le() }

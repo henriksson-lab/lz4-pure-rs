@@ -1,3 +1,20 @@
+//! `lz4` command-line interface, gated on the `cli` feature.
+//!
+//! Mirrors the upstream `lz4(1)` CLI for the subset of flags this binary
+//! supports: compress/decompress/test, write to stdout, force overwrite,
+//! and a numeric compression level (`-l 0..=12`). When neither `-z` nor
+//! `-d`/`-t` is given, the mode is inferred from the input filename — a
+//! `.lz4` extension selects decompression, anything else selects
+//! compression.
+//!
+//! Frame preferences match the upstream `lz4` CLI defaults (and therefore
+//! diverge from this crate's library defaults): 4 MiB blocks for inputs
+//! larger than 64 KiB (64 KiB blocks otherwise), independent blocks,
+//! content checksum enabled, block checksum disabled, no content-size
+//! field, and a level-to-mode remap where levels `0`, `1`, `2` use fast
+//! mode and level `3+` uses HC. See `CLAUDE.md` and
+//! `upstream/lz4/programs/lz4.1.md` for full upstream behaviour.
+
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
@@ -6,8 +23,13 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use lz4::liblz4::{BlockChecksum, BlockMode, BlockSize, ContentChecksum};
 
+/// Buffer size used when shuttling bytes between reader/encoder and
+/// decoder/writer. Sized to match the 4 MiB upstream block size so a full
+/// block is handed to `LZ4F_compressUpdate` in one call.
 const COPY_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
+/// Parsed command-line arguments. See the module-level docs for the
+/// upstream CLI subset this struct models.
 #[derive(Debug, Parser)]
 #[command(name = "lz4")]
 #[command(about = "Compress or decompress .lz4 files")]
@@ -43,12 +65,15 @@ struct Cli {
     output: Option<PathBuf>,
 }
 
+/// Operating mode selected from the CLI flags and/or input filename.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
     Compress,
     Decompress,
 }
 
+/// CLI entry point. Parses arguments, dispatches to [`run`], and exits
+/// with status 1 (printing the error to stderr) on failure.
 fn main() {
     if let Err(err) = run(Cli::parse()) {
         eprintln!("lz4: {err}");
@@ -56,6 +81,8 @@ fn main() {
     }
 }
 
+/// Validates arguments, opens input/output, and dispatches to [`compress`]
+/// or [`decompress_concatenated`] based on the selected [`Mode`].
 fn run(cli: Cli) -> io::Result<()> {
     if cli.level > 12 {
         return Err(invalid_input("compression level must be between 0 and 12"));
@@ -85,6 +112,9 @@ fn run(cli: Cli) -> io::Result<()> {
     }
 }
 
+/// Chooses [`Mode::Compress`] or [`Mode::Decompress`] from the CLI flags,
+/// falling back to a `.lz4`-extension probe of the input filename when
+/// neither `-z` nor `-d`/`-t` was supplied.
 fn mode(cli: &Cli) -> Mode {
     if cli.compress {
         return Mode::Compress;
@@ -100,6 +130,10 @@ fn mode(cli: &Cli) -> Mode {
     }
 }
 
+/// Resolves the output file path. Returns `Ok(None)` to indicate stdout
+/// (for `-c`, explicit `-` output, or `-t` test mode) and otherwise infers
+/// a path by appending `.lz4` (compress) or stripping it (decompress)
+/// when no explicit output was provided.
 fn output_path(cli: &Cli, mode: Mode) -> io::Result<Option<PathBuf>> {
     if cli.test {
         return Ok(None);
@@ -128,6 +162,9 @@ fn output_path(cli: &Cli, mode: Mode) -> io::Result<Option<PathBuf>> {
     }
 }
 
+/// Strips a trailing `.lz4` extension to produce the implicit
+/// decompression output name, or returns an error if the input does not
+/// end in `.lz4`.
 fn strip_lz4_suffix(input: &Path) -> io::Result<PathBuf> {
     let name = input.as_os_str().to_string_lossy();
     let Some(stripped) = name.strip_suffix(".lz4") else {
@@ -141,6 +178,8 @@ fn strip_lz4_suffix(input: &Path) -> io::Result<PathBuf> {
     Ok(PathBuf::from(stripped))
 }
 
+/// Opens the input as a buffered reader, falling back to stdin when the
+/// path is `None` or `-`.
 fn open_input(path: Option<&Path>) -> io::Result<Box<dyn BufRead>> {
     match path {
         None => Ok(Box::new(BufReader::new(io::stdin()))),
@@ -149,6 +188,9 @@ fn open_input(path: Option<&Path>) -> io::Result<Box<dyn BufRead>> {
     }
 }
 
+/// Opens the output as a buffered writer. When `path` is `None`, returns
+/// a writer over stdout. When `force` is `false`, refuses to overwrite an
+/// existing file (`create_new`); when `true`, truncates any existing file.
 fn create_output(path: Option<&Path>, force: bool) -> io::Result<Box<dyn Write>> {
     match path {
         None => Ok(Box::new(BufWriter::new(io::stdout()))),
@@ -164,6 +206,9 @@ fn create_output(path: Option<&Path>, force: bool) -> io::Result<Box<dyn Write>>
     }
 }
 
+/// Returns the size of `path` if it refers to a regular file on disk, so
+/// the encoder can pick a smaller block size for short inputs. Returns
+/// `None` for stdin, missing files, and non-regular files.
 fn regular_file_size(path: Option<&Path>) -> Option<u64> {
     let path = path?;
     if path == Path::new("-") {
@@ -173,6 +218,9 @@ fn regular_file_size(path: Option<&Path>) -> Option<u64> {
     metadata.is_file().then_some(metadata.len())
 }
 
+/// Picks the LZ4 frame block size to match upstream `lz4` CLI behaviour:
+/// 64 KiB blocks for inputs at most 64 KiB, 4 MiB blocks otherwise (or
+/// when the size is unknown, e.g. stdin).
 fn cli_block_size(input_size: Option<u64>) -> BlockSize {
     match input_size {
         Some(size) if size <= 64 * 1024 => BlockSize::Max64KB,
@@ -180,6 +228,11 @@ fn cli_block_size(input_size: Option<u64>) -> BlockSize {
     }
 }
 
+/// Compresses `reader` into `writer` as a single `.lz4` frame using the
+/// CLI's upstream-matching preferences (see module docs). `level` follows
+/// the upstream remap where `0..=2` route through fast mode and `3..=12`
+/// through HC, and `input_size` (when known) selects between 64 KiB and
+/// 4 MiB frame blocks.
 fn compress(
     reader: &mut dyn Read,
     writer: Box<dyn Write>,
@@ -210,6 +263,9 @@ fn compress(
     writer.flush()
 }
 
+/// Decompresses one or more concatenated `.lz4` frames from `reader`,
+/// emitting the decompressed bytes to `writer`. Stops cleanly when the
+/// reader reports EOF between frames.
 fn decompress_concatenated(reader: &mut dyn BufRead, writer: &mut dyn Write) -> io::Result<()> {
     loop {
         if reader.fill_buf()?.is_empty() {
@@ -222,6 +278,9 @@ fn decompress_concatenated(reader: &mut dyn BufRead, writer: &mut dyn Write) -> 
     }
 }
 
+/// Copies `reader` to `writer` using a [`COPY_BUFFER_SIZE`] staging buffer
+/// (4 MiB) instead of `io::copy`'s default 8 KiB, so the encoder receives
+/// full frame blocks in one call.
 fn copy_large(reader: &mut dyn Read, writer: &mut dyn Write) -> io::Result<u64> {
     let mut buffer = vec![0u8; COPY_BUFFER_SIZE];
     let mut total = 0u64;
@@ -235,6 +294,7 @@ fn copy_large(reader: &mut dyn Read, writer: &mut dyn Write) -> io::Result<u64> 
     }
 }
 
+/// Builds an [`io::ErrorKind::InvalidInput`] error with a static message.
 fn invalid_input(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }

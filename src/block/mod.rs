@@ -22,14 +22,17 @@ use super::c_char;
 use super::liblz4::*;
 use std::io::{Error, ErrorKind, Result};
 
-/// Represents the compression mode do be used.
+/// Represents the compression mode to be used by [`compress`] /
+/// [`compress_to_buffer`].
 #[derive(Clone, Copy, Debug, Default)]
 pub enum CompressionMode {
-    /// High compression with compression parameter
+    /// LZ4 high-compression mode (`LZ4_compress_HC`) at the given level
+    /// (typically `1..=12`, where higher means smaller and slower).
     HIGHCOMPRESSION(i32),
-    /// Fast compression with acceleration paramet
+    /// Fast compression (`LZ4_compress_fast`) with the given acceleration
+    /// factor. Higher acceleration is faster but compresses less.
     FAST(i32),
-    /// Default compression
+    /// Default compression (`LZ4_compress_default`).
     #[default]
     DEFAULT,
 }
@@ -218,6 +221,19 @@ pub fn decompress(src: &[u8], uncompressed_size: Option<i32>) -> Result<Vec<u8>>
     Ok(buffer)
 }
 
+/// Decompresses the `src` buffer into the caller-provided `buffer`, returning the
+/// number of decompressed bytes written.
+///
+/// If `uncompressed_size` is `None`, the original size is read as a little-endian
+/// `u32` prefix from the first 4 bytes of `src` (and stripped before decompression).
+/// Otherwise the supplied size is used and `src` is consumed as-is.
+///
+/// # Errors
+/// Returns [`std::io::Error`] with [`ErrorKind::InvalidInput`] if `src` is too
+/// short to hold the size prefix, the (parsed or provided) size is negative or
+/// too large, or `buffer` is smaller than the decompressed size.
+/// Returns [`ErrorKind::InvalidData`] if the underlying LZ4 decoder rejects the
+/// input (malformed or truncated data).
 pub fn decompress_to_buffer(
     mut src: &[u8],
     uncompressed_size: Option<i32>,

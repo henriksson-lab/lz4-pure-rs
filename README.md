@@ -4,6 +4,7 @@ Pure Rust LZ4 library with the same public API as `lz4-rs`.
 
 Translated from upstream LZ4 commit `9da37b2eebf082bfab6e57c49be71cc41119a40d`.
 
+* 2026-05-16: docstrings added
 * 2026-04-25: On par with speed of original LZ4. Passes a fair number of tests and produces exactly the same input/output. More testing should however be done
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code! 

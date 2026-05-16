@@ -1,3 +1,16 @@
+//! `Read`-based streaming decoder wrapping `LZ4F_decompress`.
+//!
+//! [`Decoder`] consumes a single LZ4 frame from an inner [`Read`] source
+//! and exposes the decompressed payload as a byte stream. The decoder owns
+//! a 4 MiB + 64 KiB scratch buffer used both to stage compressed input and
+//! to satisfy `LZ4F_decompress`'s "consume some src, produce some dst"
+//! contract. A single [`Decoder`] handles exactly one frame — to decode
+//! concatenated frames, instantiate a new decoder per frame (see the CLI
+//! in `src/bin/lz4.rs` for an example).
+//!
+//! The API mirrors the `lz4-rs` crate's [`Decoder`] so that this crate is a
+//! drop-in replacement.
+
 use super::liblz4::*;
 use super::size_t;
 use std::io::{Error, ErrorKind, Read, Result};
@@ -13,12 +26,20 @@ const BUFFER_SIZE: usize = 4 * 1024 * 1024 + 64 * 1024;
 
 // NOTE: unsafe to device Clone or Copy, otherwise
 // there can be multiple copies of the same inner LZ4 pointer
+/// RAII wrapper around an `LZ4F_dctx*` that frees the context on drop.
 #[derive(Debug)]
 struct DecoderContext {
     c: LZ4FDecompressionContext,
 }
 
 // NOTE: unsafe to derive Clone or Copy
+/// Streaming LZ4 frame decoder wrapping an inner [`Read`] source.
+///
+/// Pull bytes via the [`Read`] impl; the decoder transparently reads from
+/// the source, feeds compressed input into `LZ4F_decompress`, and emits
+/// decompressed bytes into the caller's buffer. When the frame ends,
+/// further reads return `Ok(0)`. Call [`finish`](Decoder::finish) to
+/// recover the inner reader and confirm the frame was fully consumed.
 #[derive(Debug)]
 pub struct Decoder<R> {
     c: DecoderContext,
@@ -55,6 +76,12 @@ impl<R: Read> Decoder<R> {
         &self.r
     }
 
+    /// Returns the wrapped reader together with a status result.
+    ///
+    /// The result is `Ok(())` if the LZ4 frame was fully consumed (the
+    /// frame footer and any content checksum were read and accepted) and
+    /// `Err(ErrorKind::Interrupted)` if `finish` was called before the end
+    /// of the compressed stream.
     pub fn finish(self) -> (R, Result<()>) {
         (
             self.r,

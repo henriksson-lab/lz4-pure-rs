@@ -1,3 +1,17 @@
+//! Pure-Rust translation of the LZ4 compression library, exposing the same
+//! public API as the `lz4-rs` crate so it can be used as a drop-in replacement
+//! (`use lz4::...`).
+//!
+//! The crate provides:
+//! - [`Encoder`] / [`EncoderBuilder`] and [`Decoder`] — `Write`/`Read` streaming
+//!   wrappers around the LZ4 frame format.
+//! - [`block`] — a safe block-mode API (`compress` / `decompress`) modelled on
+//!   `python-lz4`, with optional uncompressed-size prefix.
+//! - [`liblz4`] — error helpers and the re-exported low-level `sys` surface.
+//! - [`sys`] — the C-shaped LZ4 block, HC, frame, and streaming functions
+//!   translated into Rust.
+//!
+//! See the crate README for the full design rationale and parity status.
 #![doc = include_str!("../README.md")]
 
 pub mod sys;
