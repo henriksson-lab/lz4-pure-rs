@@ -4,8 +4,9 @@ Pure Rust LZ4 library with the same public API as `lz4-rs`.
 
 Translated from upstream LZ4 commit `9da37b2eebf082bfab6e57c49be71cc41119a40d`.
 
+* 2026-05-26: new audit. minor semantic drift fixed. performance improved, about on par. RSS is higher and need a future audit
 * 2026-05-16: docstrings added
-* 2026-04-25: On par with speed of original LZ4. Passes a fair number of tests and produces exactly the same input/output. More testing should however be done
+* 2026-04-25: On par with speed of original LZ4 on the generated benchmark corpus. Passes a broad fixture suite and matches upstream output on the tested corpus/API paths. More testing should however be done
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code! 
 
@@ -24,7 +25,7 @@ But:
 
 * **This approach should still be considered experimental**. The LLM technology is immature and has sharp corners. But there are opportunities to reap, and the genie is not going back into the bottle. This translation is as much aimed to learn how to improve the technology and get feedback on the results.
 * Translations are not endorsed by the original authors unless otherwise noted. **Do not send bug reports to the original developers**. Use our Github issues page instead.
-* **Do not trust the benchmarks on this page**. They are used to help evaluate the translation. If you want improved performance, you generally have to use this code as a library, and use the additional tricks it offers. We generally accept performance losses in order to reduce our dependency issues
+* **Treat the benchmarks on this page as reproducible spot checks, not universal guarantees**. They are used to help evaluate the translation on the generated corpus. If you want improved performance, you generally have to use this code as a library, and use the additional tricks it offers. We generally accept performance losses in order to reduce our dependency issues
 * **Check the original Github pages for information about the package**. This README is kept sparse on purpose. It is not meant to be the primary source of information
 * **If you are the author of the original code and wish to move to Rust, you can obtain ownership of this repository and crate**. Until then, our commitment is to offer an as-faithful-as-possible translation of a snapshot of your code. If we find serious bugs, we will report them to you. Otherwise we will just replicate them, to ensure comparability across studies that claim to use package XYZ v.666. Think of this like a fancy Ubuntu .deb-package of your software - that is how we treat it
 
@@ -59,49 +60,105 @@ oversized block headers, linked blocks, and skippable frames.
 `tools/lz4_perf_check.sh` compares the release CLI against the installed system
 `lz4` on generated random, zero-filled, source-like, JSON/log-like, FASTA-like,
 dictionary-heavy, binary-artifact, tar/many-small-file, and already-compressed
-samples. As of April 25, 2026, **CLI output is byte-identical to system
-`lz4 1.9.4` at every level** (default plus `-l 1` through `-l 12`) for every
-corpus input, and both implementations validate each other's output.
+samples. The default check byte-compares Rust and system compressed frames for
+default compression across every corpus input and for HC9-HC12 on
+`source-repeat`, then validates both implementations can decode each other's
+output. Set
+`LZ4_PURE_PARITY_SWEEP=1` to additionally byte-compare default plus levels 1
+through 12 across the full corpus (Rust `-l N`, system `-N`). As of April 25,
+2026, that sweep matched system `lz4 1.9.4` for every tested corpus input and
+level.
 
-### Speed vs system `lz4 1.9.4` (5-run median)
+### Speed vs original `lz4 1.9.4` (3-run median)
 
-Wall-clock from `tools/lz4_perf_check.sh`. Compressed sizes are byte-identical
-to system at every level shown.
+Wall-clock from `LZ4_PURE_PERF_RUNS=3 tools/lz4_perf_check.sh`, run on
+May 26, 2026, after the const-generic HC/frame/fast-path specialization work.
+The comparison target is the installed original C implementation,
+`lz4 1.9.4`. Compressed sizes are byte-identical to system at every level
+shown. The speed column is `system time / Rust time`: values above `1.00x` mean
+Rust was faster, values below `1.00x` mean Rust was slower. Several entries are
+short enough that one scheduler tick changes the result, so treat single-digit
+differences as parity.
 
 **Compression:**
 
-| Input | Size | Rust | System | Δ |
+| Input | Size | Rust | System | Rust speed vs system |
 |---|---:|---:|---:|---:|
-| random64 | 64 MiB | 0.27 s | 0.25 s | +8% |
-| zeros64 | 64 MiB | 0.04 s | 0.05 s | Rust −20% |
-| source-repeat | 78 MiB | 0.31 s | 0.28 s | +11% |
-| loglike | 22 MiB | 0.03 s | 0.03 s | parity |
-| fasta-like | 43 MiB | 0.04 s | 0.05 s | Rust −20% |
-| dictionary-heavy | 43 MiB | 0.08 s | 0.07 s | +14% |
-| already-compressed | 17 MiB | 0.08 s | 0.08 s | parity |
-| HC level 9 | 78 MiB | 3.52 s | 3.62 s | Rust −3% |
-| HC level 10 | 78 MiB | 5.02 s | 4.53 s | +11% |
-| HC level 11 | 78 MiB | 10.71 s | 10.64 s | parity |
-| HC level 12 | 78 MiB | 9.64 s | 9.22 s | +5% |
+| random64 | 64 MiB | 0.24 s | 0.24 s | 1.00x |
+| zeros64 | 64 MiB | 0.03 s | 0.05 s | 1.67x faster |
+| source-repeat | 107 MiB | 0.39 s | 0.40 s | 1.03x faster |
+| loglike | 22 MiB | 0.04 s | 0.04 s | 1.00x |
+| fasta-like | 43 MiB | 0.04 s | 0.04 s | 1.00x |
+| dictionary-heavy | 43 MiB | 0.07 s | 0.06 s | 0.86x, 1.17x slower |
+| binary-artifact | 1.6 MiB | 0.01 s | 0.01 s | 1.00x |
+| many-small.tar | 2.0 MiB | 0.01 s | 0.01 s | 1.00x |
+| already-compressed | 29 MiB | 0.13 s | 0.13 s | 1.00x |
+| HC level 9 | 107 MiB | 4.05 s | 4.30 s | 1.06x faster |
+| HC level 10 | 107 MiB | 5.57 s | 5.50 s | 0.99x, 1.01x slower |
+| HC level 11 | 107 MiB | 12.04 s | 12.26 s | 1.02x faster |
+| HC level 12 | 107 MiB | 11.65 s | 12.21 s | 1.05x faster |
 
 **Decompression** (decoding a system-generated `.lz4`):
 
+| Input | Rust | System | Rust speed vs system |
+|---|---:|---:|---:|
+| random64 | 0.08 s | 0.08 s | 1.00x |
+| zeros64 | 0.07 s | 0.09 s | 1.29x faster |
+| source-repeat | 0.16 s | 0.17 s | 1.06x faster |
+| loglike | 0.03 s | 0.04 s | 1.33x faster |
+| fasta-like | 0.05 s | 0.05 s | 1.00x |
+| dictionary-heavy | 0.06 s | 0.06 s | 1.00x |
+| binary-artifact | 0.01 s | 0.01 s | 1.00x |
+| many-small.tar | 0.01 s | 0.01 s | 1.00x |
+| already-compressed | 0.05 s | 0.05 s | 1.00x |
+
+### Peak RSS vs original `lz4 1.9.4`
+
+Peak resident set size from `/usr/bin/time -f %M`, single run on the same
+generated files. RSS is reported in MiB. This measures CLI process memory, not
+library-only allocator pressure, and is more sensitive to libc/kernel behavior
+than the timing table.
+
+**Compression RSS:**
+
 | Input | Rust | System | Δ |
 |---|---:|---:|---:|
-| random64 | 0.11 s | 0.10 s | +10% |
-| zeros64 | 0.09 s | 0.10 s | Rust −10% |
-| source-repeat | 0.13 s | 0.15 s | Rust −13% |
-| loglike | 0.04 s | 0.04 s | parity |
-| fasta-like | 0.05 s | 0.07 s | Rust −29% |
-| dictionary-heavy | 0.06 s | 0.07 s | Rust −14% |
-| already-compressed | 0.04 s | 0.03 s | +33% (10 ms abs) |
+| random64 | 10.6 MiB | 9.7 MiB | +10% |
+| zeros64 | 6.6 MiB | 5.6 MiB | +17% |
+| source-repeat | 10.9 MiB | 6.6 MiB | +67% |
+| loglike | 8.8 MiB | 5.9 MiB | +47% |
+| fasta-like | 9.7 MiB | 5.6 MiB | +72% |
+| dictionary-heavy | 9.7 MiB | 5.9 MiB | +63% |
+| binary-artifact | 6.2 MiB | 4.1 MiB | +52% |
+| many-small.tar | 6.5 MiB | 3.4 MiB | +90% |
+| already-compressed | 11.3 MiB | 9.7 MiB | +16% |
+| HC level 9 | 10.6 MiB | 6.6 MiB | +62% |
+| HC level 10 | 10.6 MiB | 6.6 MiB | +62% |
+| HC level 11 | 10.0 MiB | 6.6 MiB | +52% |
+| HC level 12 | 10.3 MiB | 6.6 MiB | +57% |
 
-In short: Rust is at parity or faster than `lz4 1.9.4` on most workloads.
-Variance between runs is ±5% on these short timings, so several "+5–10%"
-entries cross to parity in any given run. The remaining real (rather than
-noise-band) gaps are HC level 10 (+11%), `already-compressed` decompress
-(33% relative but only 10 ms absolute on a 17 MiB file), and source-repeat
-default compress (+11%).
+**Decompression RSS** (decoding a system-generated `.lz4`):
+
+| Input | Rust | System | Δ |
+|---|---:|---:|---:|
+| random64 | 10.3 MiB | 1.6 MiB | +560% |
+| zeros64 | 6.3 MiB | 5.6 MiB | +11% |
+| source-repeat | 8.4 MiB | 6.9 MiB | +23% |
+| loglike | 7.5 MiB | 6.3 MiB | +20% |
+| fasta-like | 6.6 MiB | 5.6 MiB | +17% |
+| dictionary-heavy | 7.5 MiB | 5.9 MiB | +26% |
+| binary-artifact | 5.9 MiB | 4.1 MiB | +46% |
+| many-small.tar | 4.4 MiB | 3.8 MiB | +17% |
+| already-compressed | 10.3 MiB | 1.6 MiB | +560% |
+
+In short: Rust is at parity or faster than original `lz4 1.9.4` on most speed
+checks in this corpus. The largest measured Rust wins are 1.67x faster
+compression on `zeros64`, 1.33x faster decompression on `loglike`, 1.29x faster
+decompression on `zeros64`, and 1.06x faster HC9 compression. The slowest Rust
+case here is `dictionary-heavy` compression at 0.86x system speed, or 1.17x
+slower. The main cost is memory: the Rust CLI currently uses a few more MiB of
+RSS than the original C CLI, most visibly on the raw/incompressible
+decompression cases where the system binary stays near 1.6 MiB.
 
 ## License
 

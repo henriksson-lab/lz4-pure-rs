@@ -58,6 +58,7 @@ pub struct Encoder<W> {
     c: EncoderContext,
     w: W,
     limit: usize,
+    auto_flush: bool,
     input: Vec<u8>,
     buffer: Vec<u8>,
 }
@@ -163,6 +164,7 @@ impl EncoderBuilder {
             w,
             c: EncoderContext::new()?,
             limit: block_size,
+            auto_flush: self.auto_flush,
             input: Vec::with_capacity(block_size),
             buffer: Vec::with_capacity(check_error(unsafe {
                 LZ4F_compressBound(block_size as size_t, &preferences)
@@ -261,6 +263,11 @@ impl<W: Write> Encoder<W> {
 
 impl<W: Write> Write for Encoder<W> {
     fn write(&mut self, buffer: &[u8]) -> Result<usize> {
+        if self.auto_flush {
+            self.write_update(buffer)?;
+            return Ok(buffer.len());
+        }
+
         let mut offset = 0;
         while offset < buffer.len() {
             let remaining = buffer.len() - offset;
@@ -320,6 +327,7 @@ impl Drop for EncoderContext {
 #[cfg(test)]
 mod test {
     use super::EncoderBuilder;
+    use crate::liblz4::{BlockChecksum, ContentChecksum};
     use std::io::{Read, Write};
 
     #[test]
@@ -371,6 +379,26 @@ mod test {
         let mut output = Vec::new();
         dec.read_to_end(&mut output).unwrap();
         assert_eq!(input, output);
+    }
+
+    #[test]
+    fn test_encoder_auto_flush_emits_partial_write() {
+        let mut encoder = EncoderBuilder::new()
+            .auto_flush(true)
+            .block_checksum(BlockChecksum::NoBlockChecksum)
+            .checksum(ContentChecksum::NoChecksum)
+            .build(Vec::new())
+            .unwrap();
+        let header_len = encoder.writer().len();
+        encoder.write_all(b"partial").unwrap();
+        assert!(encoder.writer().len() > header_len);
+
+        let (compressed, result) = encoder.finish();
+        result.unwrap();
+        let mut dec = crate::decoder::Decoder::new(&compressed[..]).unwrap();
+        let mut output = Vec::new();
+        dec.read_to_end(&mut output).unwrap();
+        assert_eq!(output, b"partial");
     }
 
     #[test]

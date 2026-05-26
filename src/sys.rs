@@ -70,7 +70,7 @@ pub enum BlockChecksum {
     BlockChecksumEnabled,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[repr(C)]
 pub struct LZ4FFrameInfo {
     pub block_size_id: BlockSize,
@@ -82,7 +82,7 @@ pub struct LZ4FFrameInfo {
     pub block_checksum_flag: BlockChecksum,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[repr(C)]
 pub struct LZ4FPreferences {
     pub frame_info: LZ4FFrameInfo,
@@ -107,7 +107,10 @@ pub struct LZ4FDecompressOptions {
     /// in owned context storage, so the flag is accepted but has no behavioral
     /// effect.
     pub stable_dst: c_uint,
-    pub reserved: [c_uint; 3],
+    /// When non-zero, block and content checksum fields are consumed but not
+    /// validated, matching upstream `LZ4F_decompressOptions_t`.
+    pub skipChecksums: c_uint,
+    pub reserved: [c_uint; 2],
 }
 
 #[derive(Debug)]
@@ -153,6 +156,7 @@ const LAST_LITERALS: usize = 5;
 const MFLIMIT: usize = 12;
 const OPTIMAL_ML: usize = 18;
 const LZ4_MAX_INPUT_SIZE: c_int = 0x7E00_0000;
+const LZ4HC_CLEVEL_MIN: c_int = 3;
 const LZ4HC_CLEVEL_DEFAULT: c_int = 9;
 const LZ4HC_CLEVEL_MAX: c_int = 12;
 const LZ4F_MAGIC: [u8; 4] = [0x04, 0x22, 0x4D, 0x18];
@@ -161,10 +165,14 @@ const LZ4F_SKIPPABLE_MAGIC_MAX: u32 = 0x184D_2A5F;
 const LZ4F_ERROR_MAX_CODE: usize = 24;
 const LZ4F_ERROR_GENERIC_CODE: usize = 1;
 const LZ4F_ERROR_MAX_BLOCK_SIZE_INVALID_CODE: usize = 2;
+const LZ4F_ERROR_BLOCK_MODE_INVALID_CODE: usize = 3;
 const LZ4F_ERROR_PARAMETER_INVALID_CODE: usize = 4;
+const LZ4F_ERROR_COMPRESSION_LEVEL_INVALID_CODE: usize = 5;
 const LZ4F_ERROR_HEADER_VERSION_WRONG_CODE: usize = 6;
 const LZ4F_ERROR_BLOCK_CHECKSUM_INVALID_CODE: usize = 7;
 const LZ4F_ERROR_RESERVED_FLAG_SET_CODE: usize = 8;
+const LZ4F_ERROR_ALLOCATION_FAILED_CODE: usize = 9;
+const LZ4F_ERROR_SRC_SIZE_TOO_LARGE_CODE: usize = 10;
 const LZ4F_ERROR_FRAME_SIZE_WRONG_CODE: usize = 14;
 const LZ4F_ERROR_FRAME_TYPE_UNKNOWN_CODE: usize = 13;
 const LZ4F_ERROR_SRC_PTR_WRONG_CODE: usize = 15;
@@ -176,12 +184,19 @@ const LZ4F_ERROR_CONTENT_CHECKSUM_INVALID_CODE: usize = 18;
 const LZ4F_ERROR_FRAME_DECODING_ALREADY_STARTED_CODE: usize = 19;
 const LZ4F_ERROR_COMPRESSION_STATE_UNINITIALIZED_CODE: usize = 20;
 const LZ4F_ERROR_PARAMETER_NULL_CODE: usize = 21;
+const LZ4F_ERROR_IO_WRITE_CODE: usize = 22;
+const LZ4F_ERROR_IO_READ_CODE: usize = 23;
 const ERROR_GENERIC: usize = lz4f_error(LZ4F_ERROR_GENERIC_CODE);
 const ERROR_MAX_BLOCK_SIZE_INVALID: usize = lz4f_error(LZ4F_ERROR_MAX_BLOCK_SIZE_INVALID_CODE);
+const ERROR_BLOCK_MODE_INVALID: usize = lz4f_error(LZ4F_ERROR_BLOCK_MODE_INVALID_CODE);
 const ERROR_PARAMETER_INVALID: usize = lz4f_error(LZ4F_ERROR_PARAMETER_INVALID_CODE);
+const ERROR_COMPRESSION_LEVEL_INVALID: usize =
+    lz4f_error(LZ4F_ERROR_COMPRESSION_LEVEL_INVALID_CODE);
 const ERROR_HEADER_VERSION_WRONG: usize = lz4f_error(LZ4F_ERROR_HEADER_VERSION_WRONG_CODE);
 const ERROR_BLOCK_CHECKSUM_INVALID: usize = lz4f_error(LZ4F_ERROR_BLOCK_CHECKSUM_INVALID_CODE);
 const ERROR_RESERVED_FLAG_SET: usize = lz4f_error(LZ4F_ERROR_RESERVED_FLAG_SET_CODE);
+const ERROR_ALLOCATION_FAILED: usize = lz4f_error(LZ4F_ERROR_ALLOCATION_FAILED_CODE);
+const ERROR_SRC_SIZE_TOO_LARGE: usize = lz4f_error(LZ4F_ERROR_SRC_SIZE_TOO_LARGE_CODE);
 const ERROR_FRAME_SIZE_WRONG: usize = lz4f_error(LZ4F_ERROR_FRAME_SIZE_WRONG_CODE);
 const ERROR_FRAME_TYPE_UNKNOWN: usize = lz4f_error(LZ4F_ERROR_FRAME_TYPE_UNKNOWN_CODE);
 const ERROR_SRC_PTR_WRONG: usize = lz4f_error(LZ4F_ERROR_SRC_PTR_WRONG_CODE);
@@ -195,13 +210,19 @@ const ERROR_FRAME_DECODING_ALREADY_STARTED: usize =
 const ERROR_COMPRESSION_STATE_UNINITIALIZED: usize =
     lz4f_error(LZ4F_ERROR_COMPRESSION_STATE_UNINITIALIZED_CODE);
 const ERROR_PARAMETER_NULL: usize = lz4f_error(LZ4F_ERROR_PARAMETER_NULL_CODE);
+const ERROR_IO_WRITE: usize = lz4f_error(LZ4F_ERROR_IO_WRITE_CODE);
+const ERROR_IO_READ: usize = lz4f_error(LZ4F_ERROR_IO_READ_CODE);
 
 static ERROR_GENERIC_NAME: &[u8] = b"ERROR_GENERIC\0";
 static ERROR_MAX_BLOCK_SIZE_NAME: &[u8] = b"ERROR_maxBlockSize_invalid\0";
+static ERROR_BLOCK_MODE_NAME: &[u8] = b"ERROR_blockMode_invalid\0";
 static ERROR_PARAMETER_INVALID_NAME: &[u8] = b"ERROR_parameter_invalid\0";
+static ERROR_COMPRESSION_LEVEL_NAME: &[u8] = b"ERROR_compressionLevel_invalid\0";
 static ERROR_HEADER_VERSION_NAME: &[u8] = b"ERROR_headerVersion_wrong\0";
 static ERROR_BLOCK_CHECKSUM_NAME: &[u8] = b"ERROR_blockChecksum_invalid\0";
 static ERROR_RESERVED_FLAG_NAME: &[u8] = b"ERROR_reservedFlag_set\0";
+static ERROR_ALLOCATION_FAILED_NAME: &[u8] = b"ERROR_allocation_failed\0";
+static ERROR_SRC_SIZE_TOO_LARGE_NAME: &[u8] = b"ERROR_srcSize_tooLarge\0";
 static ERROR_FRAME_SIZE_NAME: &[u8] = b"ERROR_frameSize_wrong\0";
 static ERROR_FRAME_TYPE_NAME: &[u8] = b"ERROR_frameType_unknown\0";
 static ERROR_SRC_PTR_NAME: &[u8] = b"ERROR_srcPtr_wrong\0";
@@ -214,6 +235,8 @@ static ERROR_FRAME_DECODING_ALREADY_STARTED_NAME: &[u8] = b"ERROR_frameDecoding_
 static ERROR_COMPRESSION_STATE_UNINITIALIZED_NAME: &[u8] =
     b"ERROR_compressionState_uninitialized\0";
 static ERROR_PARAMETER_NULL_NAME: &[u8] = b"ERROR_parameter_null\0";
+static ERROR_IO_WRITE_NAME: &[u8] = b"ERROR_io_write\0";
+static ERROR_IO_READ_NAME: &[u8] = b"ERROR_io_read\0";
 static ERROR_UNSPECIFIED_NAME: &[u8] = b"Unspecified error code\0";
 static LZ4_VERSION_STRING_BYTES: &[u8] = b"1.10.0\0";
 
@@ -226,6 +249,8 @@ struct CompressionCtx {
     prefs: FramePrefs,
     content_hasher: XxHash32,
     dictionary: Vec<u8>,
+    pending: Vec<u8>,
+    total_input: u64,
     external_dictionary: bool,
     started: bool,
 }
@@ -239,6 +264,7 @@ struct FramePrefs {
     content_size: u64,
     dict_id: c_uint,
     compression_level: c_int,
+    auto_flush: bool,
     favor_dec_speed: bool,
 }
 
@@ -255,6 +281,7 @@ impl Default for FramePrefs {
             content_size: 0,
             dict_id: 0,
             compression_level: 0,
+            auto_flush: false,
             favor_dec_speed: false,
         }
     }
@@ -278,6 +305,9 @@ struct DecompressionCtx {
     dictionary: Vec<u8>,
     external_dictionary: bool,
     content_hasher: XxHash32,
+    raw_block_remaining: usize,
+    raw_block_checksum: XxHash32,
+    skip_checksums: bool,
 }
 
 #[derive(Debug)]
@@ -334,6 +364,9 @@ impl Default for DecompressionCtx {
             dictionary: Vec::new(),
             external_dictionary: false,
             content_hasher: XxHash32::new(0),
+            raw_block_remaining: 0,
+            raw_block_checksum: XxHash32::new(0),
+            skip_checksums: false,
         }
     }
 }
@@ -459,10 +492,18 @@ pub unsafe extern "C" fn LZ4_compress_fast(
     maxDestSize: c_int,
     acceleration: c_int,
 ) -> c_int {
-    if sourceSize < 0 || maxDestSize <= 0 || source.is_null() || dest.is_null() {
+    if !(0..=LZ4_MAX_INPUT_SIZE).contains(&sourceSize)
+        || maxDestSize <= 0
+        || (sourceSize > 0 && source.is_null())
+        || dest.is_null()
+    {
         return 0;
     }
-    let src = slice::from_raw_parts(source as *const u8, sourceSize as usize);
+    let src = if sourceSize == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(source as *const u8, sourceSize as usize)
+    };
     let dst = slice::from_raw_parts_mut(dest as *mut u8, maxDestSize as usize);
     compress_block(src, dst, normalize_acceleration(acceleration)).map_or(0, |n| n as c_int)
 }
@@ -488,10 +529,22 @@ pub unsafe extern "C" fn LZ4_compress_fast_extState(
     maxDestSize: c_int,
     acceleration: c_int,
 ) -> c_int {
-    if state.is_null() {
+    if !(0..=LZ4_MAX_INPUT_SIZE).contains(&sourceSize)
+        || maxDestSize <= 0
+        || (sourceSize > 0 && source.is_null())
+        || dest.is_null()
+        || state.is_null()
+    {
         return 0;
     }
-    LZ4_compress_fast(source, dest, sourceSize, maxDestSize, acceleration)
+    let src = if sourceSize == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(source as *const u8, sourceSize as usize)
+    };
+    let dst = slice::from_raw_parts_mut(dest as *mut u8, maxDestSize as usize);
+    compress_block_ext_state(state, src, dst, normalize_acceleration(acceleration))
+        .map_or(0, |n| n as c_int)
 }
 
 /// `LZ4_compress_fast_extState_fastReset()` :
@@ -549,7 +602,7 @@ pub unsafe extern "C" fn LZ4_compress_destSize(
     }
     let src_slice = slice::from_raw_parts(src as *const u8, *srcSizePtr as usize);
     let dst_slice = slice::from_raw_parts_mut(dst as *mut u8, targetDstSize as usize);
-    let Some((consumed, written)) = compress_dest_size(src_slice, dst_slice) else {
+    let Some((consumed, written)) = compress_dest_size(src_slice, dst_slice, 1) else {
         return 0;
     };
     *srcSizePtr = consumed as c_int;
@@ -561,14 +614,42 @@ pub unsafe extern "C" fn LZ4_compress_destSize(
 /// `acceleration`.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_compress_destSize_extState(
-    _state: *mut c_void,
+    state: *mut c_void,
     src: *const c_char,
     dst: *mut c_char,
     srcSizePtr: *mut c_int,
     targetDstSize: c_int,
-    _acceleration: c_int,
+    acceleration: c_int,
 ) -> c_int {
-    LZ4_compress_destSize(src, dst, srcSizePtr, targetDstSize)
+    if state.is_null()
+        || src.is_null()
+        || dst.is_null()
+        || srcSizePtr.is_null()
+        || *srcSizePtr < 0
+        || targetDstSize <= 0
+    {
+        return 0;
+    }
+    if targetDstSize >= LZ4_compressBound(*srcSizePtr) {
+        return LZ4_compress_fast_extState(
+            state,
+            src,
+            dst,
+            *srcSizePtr,
+            targetDstSize,
+            acceleration,
+        );
+    }
+
+    let src_slice = slice::from_raw_parts(src as *const u8, *srcSizePtr as usize);
+    let dst_slice = slice::from_raw_parts_mut(dst as *mut u8, targetDstSize as usize);
+    let Some((consumed, written)) =
+        compress_dest_size(src_slice, dst_slice, normalize_acceleration(acceleration))
+    else {
+        return 0;
+    };
+    *srcSizePtr = consumed as c_int;
+    written as c_int
 }
 
 /// `LZ4_compress_HC()` :
@@ -618,10 +699,21 @@ pub unsafe extern "C" fn LZ4_compress_HC_extStateHC(
     maxDstSize: c_int,
     compressionLevel: c_int,
 ) -> c_int {
-    if stateHC.is_null() {
+    if stateHC.is_null() || srcSize < 0 || maxDstSize <= 0 || src.is_null() || dst.is_null() {
         return 0;
     }
-    LZ4_compress_HC(src, dst, srcSize, maxDstSize, compressionLevel)
+    let ctx = stateHC as *mut HcStreamCtx;
+    ptr::write(ctx, HcStreamCtx::default());
+    (*ctx).compression_level = normalize_hc_level(compressionLevel);
+    let src_slice = slice::from_raw_parts(src as *const u8, srcSize as usize);
+    let dst_slice = slice::from_raw_parts_mut(dst as *mut u8, maxDstSize as usize);
+    compress_hc_stream_block(
+        &mut *ctx,
+        src_slice,
+        dst_slice,
+        normalize_hc_level(compressionLevel),
+        false,
+    )
 }
 
 /// `LZ4_compress_HC_extStateHC_fastReset()` :
@@ -640,7 +732,20 @@ pub unsafe extern "C" fn LZ4_compress_HC_extStateHC_fastReset(
     dstCapacity: c_int,
     compressionLevel: c_int,
 ) -> c_int {
-    LZ4_compress_HC_extStateHC(state, src, dst, srcSize, dstCapacity, compressionLevel)
+    if state.is_null() || srcSize < 0 || dstCapacity <= 0 || src.is_null() || dst.is_null() {
+        return 0;
+    }
+    let ctx = &mut *(state as *mut HcStreamCtx);
+    ctx.compression_level = normalize_hc_level(compressionLevel);
+    let src_slice = slice::from_raw_parts(src as *const u8, srcSize as usize);
+    let dst_slice = slice::from_raw_parts_mut(dst as *mut u8, dstCapacity as usize);
+    compress_hc_stream_block(
+        ctx,
+        src_slice,
+        dst_slice,
+        normalize_hc_level(compressionLevel),
+        ctx.favor_dec_speed,
+    )
 }
 
 /// `LZ4_compress_HC_destSize()` : v1.9.0+
@@ -886,7 +991,6 @@ pub unsafe extern "C" fn LZ4_decompress_safe_partial(
     if compressedSize < 0
         || targetOutputSize < 0
         || dstCapacity < 0
-        || targetOutputSize > dstCapacity
         || source.is_null()
         || dest.is_null()
     {
@@ -894,7 +998,8 @@ pub unsafe extern "C" fn LZ4_decompress_safe_partial(
     }
     let src = slice::from_raw_parts(source as *const u8, compressedSize as usize);
     let dst = slice::from_raw_parts_mut(dest as *mut u8, dstCapacity as usize);
-    decompress_block_partial(src, dst, targetOutputSize as usize).map_or(-1, |n| n as c_int)
+    let target = cmp::min(targetOutputSize as usize, dst.len());
+    decompress_block_partial(src, dst, target).map_or(-1, |n| n as c_int)
 }
 
 /// `LZ4_decompress_safe_partial_usingDict()` :
@@ -917,7 +1022,6 @@ pub unsafe extern "C" fn LZ4_decompress_safe_partial_usingDict(
         || targetOutputSize < 0
         || dstCapacity < 0
         || dictSize < 0
-        || targetOutputSize > dstCapacity
         || source.is_null()
         || dest.is_null()
         || (dictSize > 0 && dictStart.is_null())
@@ -945,13 +1049,23 @@ pub unsafe extern "C" fn LZ4_decompress_safe_partial_usingDict(
         // rationale on why both upstream prefix specialisations collapse to
         // the same Rust call.
         let _is_prefix_64k = dictSize as usize >= 64 * 1024 - 1;
-        return decompress_block_partial_with_dict(src, dst, targetOutputSize as usize, dict)
-            .map_or(-1, |n| n as c_int);
+        return decompress_block_partial_with_dict(
+            src,
+            dst,
+            cmp::min(targetOutputSize as usize, dst.len()),
+            dict,
+        )
+        .map_or(-1, |n| n as c_int);
     }
 
     // forceExtDict path.
-    decompress_block_partial_with_dict(src, dst, targetOutputSize as usize, dict)
-        .map_or(-1, |n| n as c_int)
+    decompress_block_partial_with_dict(
+        src,
+        dst,
+        cmp::min(targetOutputSize as usize, dst.len()),
+        dict,
+    )
+    .map_or(-1, |n| n as c_int)
 }
 
 /// `LZ4_decoderRingBufferSize()` : v1.8.2+
@@ -1132,10 +1246,14 @@ pub extern "C" fn LZ4F_isError(code: size_t) -> c_uint {
 pub extern "C" fn LZ4F_getErrorName(code: size_t) -> *const c_char {
     match code {
         ERROR_MAX_BLOCK_SIZE_INVALID => ERROR_MAX_BLOCK_SIZE_NAME.as_ptr() as *const c_char,
+        ERROR_BLOCK_MODE_INVALID => ERROR_BLOCK_MODE_NAME.as_ptr() as *const c_char,
         ERROR_PARAMETER_INVALID => ERROR_PARAMETER_INVALID_NAME.as_ptr() as *const c_char,
+        ERROR_COMPRESSION_LEVEL_INVALID => ERROR_COMPRESSION_LEVEL_NAME.as_ptr() as *const c_char,
         ERROR_HEADER_VERSION_WRONG => ERROR_HEADER_VERSION_NAME.as_ptr() as *const c_char,
         ERROR_BLOCK_CHECKSUM_INVALID => ERROR_BLOCK_CHECKSUM_NAME.as_ptr() as *const c_char,
         ERROR_RESERVED_FLAG_SET => ERROR_RESERVED_FLAG_NAME.as_ptr() as *const c_char,
+        ERROR_ALLOCATION_FAILED => ERROR_ALLOCATION_FAILED_NAME.as_ptr() as *const c_char,
+        ERROR_SRC_SIZE_TOO_LARGE => ERROR_SRC_SIZE_TOO_LARGE_NAME.as_ptr() as *const c_char,
         ERROR_FRAME_SIZE_WRONG => ERROR_FRAME_SIZE_NAME.as_ptr() as *const c_char,
         ERROR_FRAME_TYPE_UNKNOWN => ERROR_FRAME_TYPE_NAME.as_ptr() as *const c_char,
         ERROR_SRC_PTR_WRONG => ERROR_SRC_PTR_NAME.as_ptr() as *const c_char,
@@ -1151,6 +1269,8 @@ pub extern "C" fn LZ4F_getErrorName(code: size_t) -> *const c_char {
             ERROR_COMPRESSION_STATE_UNINITIALIZED_NAME.as_ptr() as *const c_char
         }
         ERROR_PARAMETER_NULL => ERROR_PARAMETER_NULL_NAME.as_ptr() as *const c_char,
+        ERROR_IO_WRITE => ERROR_IO_WRITE_NAME.as_ptr() as *const c_char,
+        ERROR_IO_READ => ERROR_IO_READ_NAME.as_ptr() as *const c_char,
         ERROR_GENERIC => ERROR_GENERIC_NAME.as_ptr() as *const c_char,
         _ => ERROR_UNSPECIFIED_NAME.as_ptr() as *const c_char,
     }
@@ -1185,6 +1305,7 @@ pub extern "C" fn LZ4F_compressionLevel_max() -> c_int {
 ///   `blockSizeID` is invalid.
 #[no_mangle]
 pub extern "C" fn LZ4F_getBlockSize(blockSizeID: c_uint) -> size_t {
+    let blockSizeID = if blockSizeID == 0 { 4 } else { blockSizeID };
     if !(4..=7).contains(&blockSizeID) {
         return ERROR_MAX_BLOCK_SIZE_INVALID;
     }
@@ -1211,6 +1332,8 @@ pub unsafe extern "C" fn LZ4F_createCompressionContext(
         prefs: FramePrefs::default(),
         content_hasher: XxHash32::new(0),
         dictionary: Vec::new(),
+        pending: Vec::new(),
+        total_input: 0,
         external_dictionary: false,
         started: false,
     });
@@ -1261,6 +1384,8 @@ pub unsafe extern "C" fn LZ4F_compressBegin(
     inner.prefs = preferences_from_ptr(preferencesPtr);
     inner.content_hasher = XxHash32::new(0);
     inner.dictionary.clear();
+    inner.pending.clear();
+    inner.total_input = 0;
     inner.external_dictionary = false;
     inner.started = true;
     let header = frame_header(inner.prefs);
@@ -1400,12 +1525,14 @@ pub unsafe extern "C" fn LZ4F_compressBound(
     let prefs = preferences_from_ptr(preferencesPtr);
     let checksums = if prefs.block_checksum { 4 } else { 0 };
     let block_max = block_max_size(prefs.block_size_id);
-    let blocks = if srcSize == 0 {
+    let buffered = if prefs.auto_flush { 0 } else { block_max };
+    let total = srcSize.saturating_add(buffered);
+    let blocks = if total == 0 {
         1
     } else {
-        srcSize.div_ceil(block_max)
+        total.div_ceil(block_max)
     };
-    srcSize + blocks * (4 + checksums) + 16
+    total + blocks * (4 + checksums) + 16
 }
 
 /// `LZ4F_compressFrameBound()` :
@@ -1445,6 +1572,16 @@ pub unsafe extern "C" fn LZ4F_compressFrame(
     if dstBuffer.is_null() || (srcSize > 0 && srcBuffer.is_null()) {
         return ERROR_PARAMETER_NULL;
     }
+    let mut preferences;
+    let begin_preferences = if preferencesPtr.is_null() {
+        ptr::null()
+    } else {
+        preferences = (*preferencesPtr).clone();
+        if preferences.frame_info.content_size != 0 {
+            preferences.frame_info.content_size = srcSize as u64;
+        }
+        &preferences
+    };
     let mut ctx = LZ4FCompressionContext(ptr::null_mut());
     let code = LZ4F_createCompressionContext(&mut ctx, LZ4F_VERSION);
     if LZ4F_isError(code) != 0 {
@@ -1452,7 +1589,7 @@ pub unsafe extern "C" fn LZ4F_compressFrame(
     }
 
     let dst = dstBuffer as *mut u8;
-    let mut pos = LZ4F_compressBegin(ctx, dst, dstCapacity, preferencesPtr);
+    let mut pos = LZ4F_compressBegin(ctx, dst, dstCapacity, begin_preferences);
     if LZ4F_isError(pos) != 0 {
         LZ4F_freeCompressionContext(ctx);
         return pos;
@@ -1577,28 +1714,102 @@ pub unsafe extern "C" fn LZ4F_compressUpdate(
         &[]
     };
     let block_max = block_max_size(inner.prefs.block_size_id);
-    if src.len() > block_max {
-        let dst = slice::from_raw_parts_mut(dstBuffer, dstCapacity);
-        let mut written = 0usize;
-        for chunk in src.chunks(block_max) {
+    let dst = slice::from_raw_parts_mut(dstBuffer, dstCapacity);
+    if inner.prefs.auto_flush {
+        return compress_frame_update_blocks(inner, src, dst, true);
+    }
+
+    let mut written = 0usize;
+    if !inner.pending.is_empty() {
+        let fill = cmp::min(block_max - inner.pending.len(), src.len());
+        inner.pending.extend_from_slice(&src[..fill]);
+        if inner.pending.len() < block_max {
+            return 0;
+        }
+
+        let pending = std::mem::take(&mut inner.pending);
+        let n = compress_frame_update_block(inner, &pending, dst);
+        inner.pending = pending;
+        inner.pending.clear();
+        if LZ4F_isError(n) != 0 {
+            return n;
+        }
+        written += n;
+        let rest = &src[fill..];
+        let full_len = rest.len() / block_max * block_max;
+        if full_len > 0 {
             let Some(remaining_dst) = dst.get_mut(written..) else {
                 return ERROR_DST_TOO_SMALL;
             };
-            let n = compress_frame_update_block(inner, chunk, remaining_dst);
+            let n = compress_frame_update_blocks(inner, &rest[..full_len], remaining_dst, false);
             if LZ4F_isError(n) != 0 {
                 return n;
             }
             written += n;
         }
+        if full_len < rest.len() {
+            inner.pending.extend_from_slice(&rest[full_len..]);
+        }
         return written;
     }
 
-    let dst = slice::from_raw_parts_mut(dstBuffer, dstCapacity);
-    compress_frame_update_block(inner, src, dst)
+    let full_len = src.len() / block_max * block_max;
+    if full_len > 0 {
+        let n = compress_frame_update_blocks(inner, &src[..full_len], dst, false);
+        if LZ4F_isError(n) != 0 {
+            return n;
+        }
+        written += n;
+    }
+    if full_len < src.len() {
+        inner.pending.extend_from_slice(&src[full_len..]);
+    }
+    written
 }
 
 fn compress_frame_update_block(inner: &mut CompressionCtx, src: &[u8], dst: &mut [u8]) -> size_t {
-    let checksum_len = if inner.prefs.block_checksum { 4 } else { 0 };
+    match (
+        inner.prefs.block_checksum,
+        inner.prefs.content_checksum,
+        inner.prefs.block_independent,
+    ) {
+        (false, false, false) => {
+            compress_frame_update_block_flags::<false, false, false>(inner, src, dst)
+        }
+        (false, false, true) => {
+            compress_frame_update_block_flags::<false, false, true>(inner, src, dst)
+        }
+        (false, true, false) => {
+            compress_frame_update_block_flags::<false, true, false>(inner, src, dst)
+        }
+        (false, true, true) => {
+            compress_frame_update_block_flags::<false, true, true>(inner, src, dst)
+        }
+        (true, false, false) => {
+            compress_frame_update_block_flags::<true, false, false>(inner, src, dst)
+        }
+        (true, false, true) => {
+            compress_frame_update_block_flags::<true, false, true>(inner, src, dst)
+        }
+        (true, true, false) => {
+            compress_frame_update_block_flags::<true, true, false>(inner, src, dst)
+        }
+        (true, true, true) => {
+            compress_frame_update_block_flags::<true, true, true>(inner, src, dst)
+        }
+    }
+}
+
+fn compress_frame_update_block_flags<
+    const BLOCK_CHECKSUM: bool,
+    const CONTENT_CHECKSUM: bool,
+    const BLOCK_INDEPENDENT: bool,
+>(
+    inner: &mut CompressionCtx,
+    src: &[u8],
+    dst: &mut [u8],
+) -> size_t {
+    let checksum_len = if BLOCK_CHECKSUM { 4 } else { 0 };
     let raw_needed = 4 + src.len() + checksum_len;
     if dst.len() < raw_needed {
         return ERROR_DST_TOO_SMALL;
@@ -1615,10 +1826,11 @@ fn compress_frame_update_block(inner: &mut CompressionCtx, src: &[u8], dst: &mut
 
     let block_size = (block_len as u32) | if raw { 0x8000_0000 } else { 0 };
     dst[..4].copy_from_slice(&block_size.to_le_bytes());
-    if inner.prefs.content_checksum {
+    if CONTENT_CHECKSUM {
         inner.content_hasher.update(src);
     }
-    if !inner.prefs.block_independent {
+    inner.total_input = inner.total_input.saturating_add(src.len() as u64);
+    if !BLOCK_INDEPENDENT {
         append_hc_dictionary(&mut inner.dictionary, src);
         inner.external_dictionary = false;
     } else if inner.external_dictionary {
@@ -1626,11 +1838,94 @@ fn compress_frame_update_block(inner: &mut CompressionCtx, src: &[u8], dst: &mut
         inner.external_dictionary = false;
     }
     let needed = 4 + block_len + checksum_len;
-    if inner.prefs.block_checksum {
+    if BLOCK_CHECKSUM {
         let checksum = xxhash32(&dst[4..4 + block_len], 0);
         dst[4 + block_len..needed].copy_from_slice(&checksum.to_le_bytes());
     }
     needed
+}
+
+fn compress_frame_update_blocks(
+    inner: &mut CompressionCtx,
+    src: &[u8],
+    dst: &mut [u8],
+    emit_partial: bool,
+) -> size_t {
+    match (
+        inner.prefs.block_checksum,
+        inner.prefs.content_checksum,
+        inner.prefs.block_independent,
+    ) {
+        (false, false, false) => {
+            compress_frame_update_blocks_flags::<false, false, false>(inner, src, dst, emit_partial)
+        }
+        (false, false, true) => {
+            compress_frame_update_blocks_flags::<false, false, true>(inner, src, dst, emit_partial)
+        }
+        (false, true, false) => {
+            compress_frame_update_blocks_flags::<false, true, false>(inner, src, dst, emit_partial)
+        }
+        (false, true, true) => {
+            compress_frame_update_blocks_flags::<false, true, true>(inner, src, dst, emit_partial)
+        }
+        (true, false, false) => {
+            compress_frame_update_blocks_flags::<true, false, false>(inner, src, dst, emit_partial)
+        }
+        (true, false, true) => {
+            compress_frame_update_blocks_flags::<true, false, true>(inner, src, dst, emit_partial)
+        }
+        (true, true, false) => {
+            compress_frame_update_blocks_flags::<true, true, false>(inner, src, dst, emit_partial)
+        }
+        (true, true, true) => {
+            compress_frame_update_blocks_flags::<true, true, true>(inner, src, dst, emit_partial)
+        }
+    }
+}
+
+fn compress_frame_update_blocks_flags<
+    const BLOCK_CHECKSUM: bool,
+    const CONTENT_CHECKSUM: bool,
+    const BLOCK_INDEPENDENT: bool,
+>(
+    inner: &mut CompressionCtx,
+    src: &[u8],
+    dst: &mut [u8],
+    emit_partial: bool,
+) -> size_t {
+    let block_max = block_max_size(inner.prefs.block_size_id);
+    let mut written = 0usize;
+    let mut chunks = src.chunks_exact(block_max);
+    for chunk in &mut chunks {
+        let Some(remaining_dst) = dst.get_mut(written..) else {
+            return ERROR_DST_TOO_SMALL;
+        };
+        let n = compress_frame_update_block_flags::<
+            BLOCK_CHECKSUM,
+            CONTENT_CHECKSUM,
+            BLOCK_INDEPENDENT,
+        >(inner, chunk, remaining_dst);
+        if LZ4F_isError(n) != 0 {
+            return n;
+        }
+        written += n;
+    }
+    let remainder = chunks.remainder();
+    if emit_partial && !remainder.is_empty() {
+        let Some(remaining_dst) = dst.get_mut(written..) else {
+            return ERROR_DST_TOO_SMALL;
+        };
+        let n = compress_frame_update_block_flags::<
+            BLOCK_CHECKSUM,
+            CONTENT_CHECKSUM,
+            BLOCK_INDEPENDENT,
+        >(inner, remainder, remaining_dst);
+        if LZ4F_isError(n) != 0 {
+            return n;
+        }
+        written += n;
+    }
+    written
 }
 
 /// `LZ4F_uncompressedUpdate()` :
@@ -1672,23 +1967,19 @@ pub unsafe extern "C" fn LZ4F_uncompressedUpdate(
         &[]
     };
     let dst = slice::from_raw_parts_mut(dstBuffer as *mut u8, dstCapacity);
-    let block_max = block_max_size(inner.prefs.block_size_id);
-    let mut written = 0usize;
-    for chunk in src.chunks(block_max) {
-        let Some(remaining_dst) = dst.get_mut(written..) else {
-            return ERROR_DST_TOO_SMALL;
-        };
-        let n = compress_frame_raw_block(inner, chunk, remaining_dst);
-        if LZ4F_isError(n) != 0 {
-            return n;
-        }
-        written += n;
-    }
-    written
+    compress_frame_raw_blocks(inner, src, dst)
 }
 
-fn compress_frame_raw_block(inner: &mut CompressionCtx, src: &[u8], dst: &mut [u8]) -> size_t {
-    let checksum_len = if inner.prefs.block_checksum { 4 } else { 0 };
+fn compress_frame_raw_block_flags<
+    const BLOCK_CHECKSUM: bool,
+    const CONTENT_CHECKSUM: bool,
+    const BLOCK_INDEPENDENT: bool,
+>(
+    inner: &mut CompressionCtx,
+    src: &[u8],
+    dst: &mut [u8],
+) -> size_t {
+    let checksum_len = if BLOCK_CHECKSUM { 4 } else { 0 };
     let needed = 4 + src.len() + checksum_len;
     if dst.len() < needed {
         return ERROR_DST_TOO_SMALL;
@@ -1696,20 +1987,80 @@ fn compress_frame_raw_block(inner: &mut CompressionCtx, src: &[u8], dst: &mut [u
     let block_size = (src.len() as u32) | 0x8000_0000;
     dst[..4].copy_from_slice(&block_size.to_le_bytes());
     dst[4..4 + src.len()].copy_from_slice(src);
-    if inner.prefs.block_checksum {
+    if BLOCK_CHECKSUM {
         let checksum = xxhash32(&dst[4..4 + src.len()], 0);
         dst[4 + src.len()..needed].copy_from_slice(&checksum.to_le_bytes());
     }
-    if inner.prefs.content_checksum {
+    if CONTENT_CHECKSUM {
         inner.content_hasher.update(src);
     }
-    if !inner.prefs.block_independent {
+    inner.total_input = inner.total_input.saturating_add(src.len() as u64);
+    if !BLOCK_INDEPENDENT {
         append_hc_dictionary(&mut inner.dictionary, src);
     } else if inner.external_dictionary {
         inner.dictionary.clear();
         inner.external_dictionary = false;
     }
     needed
+}
+
+fn compress_frame_raw_blocks(inner: &mut CompressionCtx, src: &[u8], dst: &mut [u8]) -> size_t {
+    match (
+        inner.prefs.block_checksum,
+        inner.prefs.content_checksum,
+        inner.prefs.block_independent,
+    ) {
+        (false, false, false) => {
+            compress_frame_raw_blocks_flags::<false, false, false>(inner, src, dst)
+        }
+        (false, false, true) => {
+            compress_frame_raw_blocks_flags::<false, false, true>(inner, src, dst)
+        }
+        (false, true, false) => {
+            compress_frame_raw_blocks_flags::<false, true, false>(inner, src, dst)
+        }
+        (false, true, true) => {
+            compress_frame_raw_blocks_flags::<false, true, true>(inner, src, dst)
+        }
+        (true, false, false) => {
+            compress_frame_raw_blocks_flags::<true, false, false>(inner, src, dst)
+        }
+        (true, false, true) => {
+            compress_frame_raw_blocks_flags::<true, false, true>(inner, src, dst)
+        }
+        (true, true, false) => {
+            compress_frame_raw_blocks_flags::<true, true, false>(inner, src, dst)
+        }
+        (true, true, true) => compress_frame_raw_blocks_flags::<true, true, true>(inner, src, dst),
+    }
+}
+
+fn compress_frame_raw_blocks_flags<
+    const BLOCK_CHECKSUM: bool,
+    const CONTENT_CHECKSUM: bool,
+    const BLOCK_INDEPENDENT: bool,
+>(
+    inner: &mut CompressionCtx,
+    src: &[u8],
+    dst: &mut [u8],
+) -> size_t {
+    let block_max = block_max_size(inner.prefs.block_size_id);
+    let mut written = 0usize;
+    for chunk in src.chunks(block_max) {
+        let Some(remaining_dst) = dst.get_mut(written..) else {
+            return ERROR_DST_TOO_SMALL;
+        };
+        let n = compress_frame_raw_block_flags::<BLOCK_CHECKSUM, CONTENT_CHECKSUM, BLOCK_INDEPENDENT>(
+            inner,
+            chunk,
+            remaining_dst,
+        );
+        if LZ4F_isError(n) != 0 {
+            return n;
+        }
+        written += n;
+    }
+    written
 }
 
 /// `LZ4F_flush()` :
@@ -1730,7 +2081,7 @@ fn compress_frame_raw_block(inner: &mut CompressionCtx, src: &[u8], dst: &mut [u
 pub unsafe extern "C" fn LZ4F_flush(
     ctx: LZ4FCompressionContext,
     dstBuffer: *mut u8,
-    _dstCapacity: size_t,
+    dstCapacity: size_t,
     _cOptPtr: *const LZ4FCompressOptions,
 ) -> size_t {
     if ctx.0.is_null() || dstBuffer.is_null() {
@@ -1740,7 +2091,18 @@ pub unsafe extern "C" fn LZ4F_flush(
     if !inner.started {
         return ERROR_COMPRESSION_STATE_UNINITIALIZED;
     }
-    0
+    if inner.pending.is_empty() {
+        return 0;
+    }
+    let dst = slice::from_raw_parts_mut(dstBuffer, dstCapacity);
+    let pending = std::mem::take(&mut inner.pending);
+    let n = compress_frame_update_block(inner, &pending, dst);
+    if LZ4F_isError(n) == 0 {
+        inner.pending.clear();
+    } else {
+        inner.pending = pending;
+    }
+    n
 }
 
 /// `LZ4F_compressEnd()` :
@@ -1769,17 +2131,38 @@ pub unsafe extern "C" fn LZ4F_compressEnd(
     if !inner.started {
         return ERROR_COMPRESSION_STATE_UNINITIALIZED;
     }
-    let needed = 4 + if inner.prefs.content_checksum { 4 } else { 0 };
-    if dstCapacity < needed {
+    let footer_len = 4 + if inner.prefs.content_checksum { 4 } else { 0 };
+    if dstCapacity < footer_len {
         return ERROR_DST_TOO_SMALL;
     }
     let dst = slice::from_raw_parts_mut(dstBuffer, dstCapacity);
-    dst[..4].copy_from_slice(&0u32.to_le_bytes());
+    let mut pos = 0usize;
+    if !inner.pending.is_empty() {
+        let checksum_len = if inner.prefs.block_checksum { 4 } else { 0 };
+        let max_pending_len = 4 + inner.pending.len() + checksum_len + footer_len;
+        if dstCapacity < max_pending_len {
+            return ERROR_DST_TOO_SMALL;
+        }
+        let pending = std::mem::take(&mut inner.pending);
+        let n = compress_frame_update_block(inner, &pending, dst);
+        if LZ4F_isError(n) != 0 {
+            inner.pending = pending;
+            return n;
+        }
+        pos += n;
+    }
+    if inner.prefs.content_size != 0 && inner.total_input != inner.prefs.content_size {
+        return ERROR_FRAME_SIZE_WRONG;
+    }
+    if dstCapacity - pos < footer_len {
+        return ERROR_DST_TOO_SMALL;
+    }
+    dst[pos..pos + 4].copy_from_slice(&0u32.to_le_bytes());
     if inner.prefs.content_checksum {
-        dst[4..8].copy_from_slice(&inner.content_hasher.digest().to_le_bytes());
+        dst[pos + 4..pos + 8].copy_from_slice(&inner.content_hasher.digest().to_le_bytes());
     }
     inner.started = false;
-    needed
+    pos + footer_len
 }
 
 /// `LZ4F_createDecompressionContext()` :
@@ -1808,7 +2191,10 @@ pub unsafe extern "C" fn LZ4F_freeDecompressionContext(
     ctx: LZ4FDecompressionContext,
 ) -> LZ4FErrorCode {
     if !ctx.0.is_null() {
-        drop(Box::from_raw(ctx.0 as *mut DecompressionCtx));
+        let boxed = Box::from_raw(ctx.0 as *mut DecompressionCtx);
+        let status = decompression_free_status(&boxed);
+        drop(boxed);
+        return status;
     }
     0
 }
@@ -2012,6 +2398,10 @@ pub unsafe extern "C" fn LZ4F_decompress(
     // stable and unstable destination modes share the same behavior.
     let _stable_dst = !dOptPtr.is_null() && (*dOptPtr).stable_dst != 0;
     let inner = &mut *(ctx.0 as *mut DecompressionCtx);
+    if !dOptPtr.is_null() && (*dOptPtr).skipChecksums != 0 {
+        inner.skip_checksums = true;
+    }
+    let skip_checksums = inner.skip_checksums;
     let src_size = *srcSizePtr;
     let dst_capacity = *dstSizePtr;
     if dst_capacity > 0 && dstBuffer.is_null() {
@@ -2027,10 +2417,30 @@ pub unsafe extern "C" fn LZ4F_decompress(
         && !inner.done
     {
         let src = slice::from_raw_parts(srcBuffer, src_size);
+        if let Some(result) = try_copy_raw_block_slice_to_dst(
+            inner,
+            src,
+            slice::from_raw_parts_mut(dstBuffer, dst_capacity),
+            skip_checksums,
+        ) {
+            match result {
+                Ok((consumed, written)) => {
+                    *srcSizePtr = consumed;
+                    *dstSizePtr = written;
+                    if inner.done && pending_is_empty(inner) {
+                        *inner = DecompressionCtx::default();
+                        return 0;
+                    }
+                    return frame_hint(inner);
+                }
+                Err(code) => return code,
+            }
+        }
         if let Some(result) = try_decompress_frame_block_slice_to_dst(
             inner,
             src,
             slice::from_raw_parts_mut(dstBuffer, dst_capacity),
+            skip_checksums,
         ) {
             match result {
                 Ok((consumed, written)) => {
@@ -2073,7 +2483,23 @@ pub unsafe extern "C" fn LZ4F_decompress(
             if remaining.is_empty() {
                 break;
             }
-            match try_decompress_frame_block_to_dst(inner, remaining) {
+            if inner.raw_block_remaining > 0 {
+                match copy_raw_block_from_input_to_dst(inner, remaining, skip_checksums) {
+                    Some(Ok(written)) => {
+                        total_written += written;
+                        if inner.done {
+                            break;
+                        }
+                        if written == 0 {
+                            break;
+                        }
+                        continue;
+                    }
+                    Some(Err(code)) => return code,
+                    None => break,
+                }
+            }
+            match try_decompress_frame_block_to_dst(inner, remaining, skip_checksums) {
                 Some(Ok(written)) => {
                     total_written += written;
                     if inner.done {
@@ -2102,7 +2528,7 @@ pub unsafe extern "C" fn LZ4F_decompress(
         }
     }
 
-    if let Err(code) = parse_available_frame(inner) {
+    if let Err(code) = parse_available_frame(inner, skip_checksums) {
         return code;
     }
     let pending_len = pending_len(inner);
@@ -2121,7 +2547,7 @@ pub unsafe extern "C" fn LZ4F_decompress(
     }
     *dstSizePtr = to_copy;
     if pending_is_empty(inner) && !inner.done {
-        if let Err(code) = parse_available_frame(inner) {
+        if let Err(code) = parse_available_frame(inner, skip_checksums) {
             return code;
         }
     }
@@ -2626,7 +3052,11 @@ pub unsafe extern "C" fn LZ4_resetStreamHC_fast(stream: *mut LZ4StreamHC, compre
 /// will generate deprecation warnings in a future version.
 #[no_mangle]
 pub unsafe extern "C" fn LZ4_resetStreamHC(stream: *mut LZ4StreamHC, compressionLevel: c_int) {
-    LZ4_resetStreamHC_fast(stream, compressionLevel)
+    if !stream.is_null() {
+        let ctx = &mut *(stream as *mut HcStreamCtx);
+        *ctx = HcStreamCtx::default();
+        ctx.compression_level = normalize_hc_level(compressionLevel);
+    }
 }
 
 /// Initialize an `LZ4_streamHC_t` placed in a user-provided buffer.
@@ -3168,11 +3598,38 @@ pub unsafe extern "C" fn LZ4_decompress_safe_continue(
     }
 }
 
-/// Clamp the acceleration parameter to the upstream minimum of `1`, matching
-/// the `acceleration >= 1` invariant asserted in
-/// `LZ4_compress_generic_validated`.
+/// Clamp the acceleration parameter to upstream's accepted range.
 fn normalize_acceleration(acceleration: c_int) -> usize {
-    cmp::max(acceleration, 1) as usize
+    acceleration.clamp(1, 65_537) as usize
+}
+
+trait FastHashTable {
+    fn get(&self, h: usize) -> usize;
+    fn set(&mut self, h: usize, pos: usize);
+}
+
+impl FastHashTable for [u32] {
+    #[inline]
+    fn get(&self, h: usize) -> usize {
+        self[h] as usize
+    }
+
+    #[inline]
+    fn set(&mut self, h: usize, pos: usize) {
+        self[h] = pos as u32;
+    }
+}
+
+impl FastHashTable for [u16] {
+    #[inline]
+    fn get(&self, h: usize) -> usize {
+        self[h] as usize
+    }
+
+    #[inline]
+    fn set(&mut self, h: usize, pos: usize) {
+        self[h] = pos as u16;
+    }
 }
 
 /// Single-pass fast LZ4 block compressor without a dictionary. Mirrors upstream
@@ -3182,32 +3639,53 @@ fn normalize_acceleration(acceleration: c_int) -> usize {
 /// Returns the number of compressed bytes written, or `None` if encoding could
 /// not fit in `dst`.
 fn compress_block(src: &[u8], dst: &mut [u8], acceleration: usize) -> Option<usize> {
+    if src.len() < LZ4_64K_LIMIT {
+        let mut table = vec![0u16; 1 << LZ4_HASH_BITS_U16];
+        compress_block_with_table::<true, _>(src, dst, acceleration, &mut table[..])
+    } else {
+        let mut table = vec![0u32; 1 << LZ4_HASH_BITS];
+        compress_block_with_table::<false, _>(src, dst, acceleration, &mut table[..])
+    }
+}
+
+fn compress_block_ext_state(
+    state: *mut c_void,
+    src: &[u8],
+    dst: &mut [u8],
+    acceleration: usize,
+) -> Option<usize> {
+    if src.len() < LZ4_64K_LIMIT {
+        let table = unsafe { slice::from_raw_parts_mut(state as *mut u16, 1 << LZ4_HASH_BITS_U16) };
+        table.fill(0);
+        compress_block_with_table::<true, _>(src, dst, acceleration, table)
+    } else {
+        let table = unsafe { slice::from_raw_parts_mut(state as *mut u32, 1 << LZ4_HASH_BITS) };
+        table.fill(0);
+        compress_block_with_table::<false, _>(src, dst, acceleration, table)
+    }
+}
+
+fn compress_block_with_table<const BY_U16: bool, T: FastHashTable + ?Sized>(
+    src: &[u8],
+    dst: &mut [u8],
+    acceleration: usize,
+    table: &mut T,
+) -> Option<usize> {
     if src.is_empty() {
         return emit_last_literals(src, dst, 0, 0);
     }
     if src.len() < MFLIMIT + 1 {
         return emit_last_literals(src, dst, 0, 0);
     }
-    let by_u16 = src.len() < LZ4_64K_LIMIT;
-    let hash_bits = if by_u16 {
-        LZ4_HASH_BITS_U16
-    } else {
-        LZ4_HASH_BITS
-    };
-    // u32 table entries instead of usize: positions fit u32 (max input is
-    // bounded by `LZ4_MAX_INPUT_SIZE = 0x7E000000 ≈ 2 GiB`), and halving
-    // the per-entry width halves the table's L1 cache footprint. Mirrors
-    // upstream's `byU32`/`byU16` table types.
-    let mut table = vec![0u32; 1 << hash_bits];
     let mut ip = 0usize;
     let mut anchor = 0usize;
     let mut op = 0usize;
     let mflimit_plus_one = src.len() - MFLIMIT + 1;
     let match_limit = src.len() - LAST_LITERALS;
 
-    table[hash_fast(src, ip, by_u16)] = ip as u32;
+    table.set(hash_fast_const::<BY_U16>(src, ip), ip);
     ip += 1;
-    let mut forward_h = hash_fast(src, ip, by_u16);
+    let mut forward_h = hash_fast_const::<BY_U16>(src, ip);
 
     let src_ptr = src.as_ptr();
 
@@ -3228,9 +3706,9 @@ fn compress_block(src: &[u8], dst: &mut [u8], acceleration: usize) -> Option<usi
                 return emit_last_literals(src, dst, anchor, op);
             }
 
-            ref_pos = table[h] as usize;
-            forward_h = hash_fast(src, forward_ip, by_u16);
-            table[h] = ip as u32;
+            ref_pos = table.get(h);
+            forward_h = hash_fast_const::<BY_U16>(src, forward_ip);
+            table.set(h, ip);
 
             // Mirrors upstream's `LZ4_read32(match) == LZ4_read32(ip)` —
             // a single 4-byte unaligned compare instead of a slice memcmp.
@@ -3258,10 +3736,10 @@ fn compress_block(src: &[u8], dst: &mut [u8], acceleration: usize) -> Option<usi
                 return emit_last_literals(src, dst, anchor, op);
             }
 
-            table[hash_fast(src, ip - 2, by_u16)] = (ip - 2) as u32;
-            let h = hash_fast(src, ip, by_u16);
-            ref_pos = table[h] as usize;
-            table[h] = ip as u32;
+            table.set(hash_fast_const::<BY_U16>(src, ip - 2), ip - 2);
+            let h = hash_fast_const::<BY_U16>(src, ip);
+            ref_pos = table.get(h);
+            table.set(h, ip);
             if ip > ref_pos
                 && ip - ref_pos <= LZ4_DISTANCE_MAX
                 && unsafe { read_u32_ptr(src_ptr.add(ref_pos)) == read_u32_ptr(src_ptr.add(ip)) }
@@ -3270,7 +3748,7 @@ fn compress_block(src: &[u8], dst: &mut [u8], acceleration: usize) -> Option<usi
             }
 
             ip += 1;
-            forward_h = hash_fast(src, ip, by_u16);
+            forward_h = hash_fast_const::<BY_U16>(src, ip);
             break;
         }
     }
@@ -3282,7 +3760,7 @@ fn compress_block(src: &[u8], dst: &mut [u8], acceleration: usize) -> Option<usi
 /// In contrast to `compress_block`, encoding never simply bails on overflow:
 /// when the destination cannot hold the next sequence, the parser stops or
 /// truncates the trailing literals run.
-fn compress_dest_size(src: &[u8], dst: &mut [u8]) -> Option<(usize, usize)> {
+fn compress_dest_size(src: &[u8], dst: &mut [u8], acceleration: usize) -> Option<(usize, usize)> {
     // Single-pass fillOutput compressor, mirroring upstream
     // `LZ4_compress_generic(..., fillOutput, ...)` (lz4.c:931+). The
     // previous implementation binary-searched over input prefixes; this
@@ -3290,21 +3768,31 @@ fn compress_dest_size(src: &[u8], dst: &mut [u8]) -> Option<(usize, usize)> {
     if dst.is_empty() {
         return None;
     }
-    let acceleration = 1usize;
     let olimit = dst.len();
-
-    // Tail spaces required by upstream's pre-checks. The "+ MFLIMIT - MINMATCH"
-    // term reserves room so the parser can always fall through to a final
-    // literal run that satisfies LZ4's end-of-block constraint.
-    let tail = MFLIMIT - MINMATCH; // = 8
-    let last_lit = LAST_LITERALS; // = 5
 
     if src.len() < MFLIMIT + 1 {
         return Some(emit_truncated_last_literals(src, dst, 0, 0, olimit));
     }
 
-    let by_u16 = src.len() < LZ4_64K_LIMIT;
-    let hash_bits = if by_u16 {
+    if src.len() < LZ4_64K_LIMIT {
+        compress_dest_size_inner::<true>(src, dst, acceleration, olimit)
+    } else {
+        compress_dest_size_inner::<false>(src, dst, acceleration, olimit)
+    }
+}
+
+fn compress_dest_size_inner<const BY_U16: bool>(
+    src: &[u8],
+    dst: &mut [u8],
+    acceleration: usize,
+    olimit: usize,
+) -> Option<(usize, usize)> {
+    // Tail spaces required by upstream's pre-checks. The "+ MFLIMIT - MINMATCH"
+    // term reserves room so the parser can always fall through to a final
+    // literal run that satisfies LZ4's end-of-block constraint.
+    let tail = MFLIMIT - MINMATCH; // = 8
+    let last_lit = LAST_LITERALS; // = 5
+    let hash_bits = if BY_U16 {
         LZ4_HASH_BITS_U16
     } else {
         LZ4_HASH_BITS
@@ -3317,9 +3805,9 @@ fn compress_dest_size(src: &[u8], dst: &mut [u8]) -> Option<(usize, usize)> {
     let mflimit_plus_one = src.len() - MFLIMIT + 1;
     let match_limit = src.len() - LAST_LITERALS;
 
-    table[hash_fast(src, ip, by_u16)] = ip as u32;
+    table[hash_fast_const::<BY_U16>(src, ip)] = ip as u32;
     ip += 1;
-    let mut forward_h = hash_fast(src, ip, by_u16);
+    let mut forward_h = hash_fast_const::<BY_U16>(src, ip);
 
     'outer: loop {
         let mut forward_ip = ip;
@@ -3339,7 +3827,7 @@ fn compress_dest_size(src: &[u8], dst: &mut [u8]) -> Option<(usize, usize)> {
             }
 
             ref_pos = table[h] as usize;
-            forward_h = hash_fast(src, forward_ip, by_u16);
+            forward_h = hash_fast_const::<BY_U16>(src, forward_ip);
             table[h] = ip as u32;
 
             if ip > ref_pos
@@ -3432,8 +3920,8 @@ fn compress_dest_size(src: &[u8], dst: &mut [u8]) -> Option<(usize, usize)> {
                 break 'outer;
             }
 
-            table[hash_fast(src, ip - 2, by_u16)] = (ip - 2) as u32;
-            let h = hash_fast(src, ip, by_u16);
+            table[hash_fast_const::<BY_U16>(src, ip - 2)] = (ip - 2) as u32;
+            let h = hash_fast_const::<BY_U16>(src, ip);
             let next_ref = table[h] as usize;
             table[h] = ip as u32;
             if ip > next_ref
@@ -3447,7 +3935,7 @@ fn compress_dest_size(src: &[u8], dst: &mut [u8]) -> Option<(usize, usize)> {
             }
 
             ip += 1;
-            forward_h = hash_fast(src, ip, by_u16);
+            forward_h = hash_fast_const::<BY_U16>(src, ip);
             break;
         }
     }
@@ -3953,7 +4441,7 @@ fn compress_block_hc(
     if level >= 10 {
         return compress_block_hc_optimal(src, dst, 0, level, favor_dec_speed);
     }
-    compress_block_hc_hashchain(src, dst, 0, compression_level)
+    compress_block_hc_hashchain(src, dst, 0, level)
 }
 
 /// Upstream `LZ4HC_compress_hashChain()` port, shared between no-dict and
@@ -3964,18 +4452,28 @@ fn compress_block_hc_hashchain(
     full: &[u8],
     dst: &mut [u8],
     base: usize,
-    compression_level: c_int,
+    level: c_int,
 ) -> Option<usize> {
-    let attempts = hc_search_attempts(compression_level);
+    match level {
+        3 => compress_block_hc_hashchain_impl::<4, false>(full, dst, base),
+        4 => compress_block_hc_hashchain_impl::<8, false>(full, dst, base),
+        5 => compress_block_hc_hashchain_impl::<16, false>(full, dst, base),
+        6 => compress_block_hc_hashchain_impl::<32, false>(full, dst, base),
+        7 => compress_block_hc_hashchain_impl::<64, false>(full, dst, base),
+        8 => compress_block_hc_hashchain_impl::<128, false>(full, dst, base),
+        _ => compress_block_hc_hashchain_impl::<256, true>(full, dst, base),
+    }
+}
+
+fn compress_block_hc_hashchain_impl<const ATTEMPTS: usize, const PATTERN_ANALYSIS: bool>(
+    full: &[u8],
+    dst: &mut [u8],
+    base: usize,
+) -> Option<usize> {
     let mut table = HcTables::with_base(full.len(), base);
     if base > 0 {
         table.insert_until(full, base);
     }
-    let wider_flags = if attempts > 128 {
-        HC_FLAG_PATTERN_ANALYSIS
-    } else {
-        0
-    };
 
     let mut anchor = base;
     let mut op = 0usize;
@@ -3989,7 +4487,7 @@ fn compress_block_hc_hashchain(
     let mut ip = base;
 
     while ip <= mflimit {
-        let mut m1 = find_hc_match(full, &mut table, ip, match_limit, attempts);
+        let mut m1 = find_hc_match::<PATTERN_ANALYSIS>(full, &mut table, ip, match_limit, ATTEMPTS);
         if m1.len < MINMATCH {
             ip += 1;
             continue;
@@ -4002,15 +4500,14 @@ fn compress_block_hc_hashchain(
             let mut m2;
             if ip + m1.len <= mflimit {
                 start2 = ip + m1.len - 2;
-                m2 = find_hc_wider_match(
+                m2 = find_hc_wider_match::<PATTERN_ANALYSIS, false, false>(
                     full,
                     &mut table,
                     start2,
                     ip,
                     match_limit,
                     m1.len,
-                    attempts,
-                    wider_flags,
+                    ATTEMPTS,
                 );
                 start2 = m2.start;
             } else {
@@ -4054,15 +4551,14 @@ fn compress_block_hc_hashchain(
                 let m3;
                 if start2 + m2.len <= mflimit {
                     start3 = start2 + m2.len - 3;
-                    m3 = find_hc_wider_match(
+                    m3 = find_hc_wider_match::<PATTERN_ANALYSIS, false, false>(
                         full,
                         &mut table,
                         start3,
                         start2,
                         match_limit,
                         m2.len,
-                        attempts,
-                        wider_flags,
+                        ATTEMPTS,
                     );
                     start3 = m3.start;
                 } else {
@@ -4180,7 +4676,7 @@ fn compress_block_hc_with_dict(
     if level >= 10 {
         return compress_block_hc_optimal(&full, dst, base, level, favor_dec_speed);
     }
-    compress_block_hc_hashchain(&full, dst, base, compression_level)
+    compress_block_hc_hashchain(&full, dst, base, level)
 }
 
 /// HC optimal parser (levels 10-12). Mirrors upstream `LZ4HC_compress_optimal`
@@ -4198,6 +4694,30 @@ fn compress_block_hc_optimal(
     compression_level: c_int,
     favor_dec_speed: bool,
 ) -> Option<usize> {
+    match (normalize_hc_level(compression_level), favor_dec_speed) {
+        (10, false) => compress_block_hc_optimal_impl::<96, 64, false, false>(full, dst, base),
+        (10, true) => compress_block_hc_optimal_impl::<96, 64, false, true>(full, dst, base),
+        (11, false) => compress_block_hc_optimal_impl::<512, 128, false, false>(full, dst, base),
+        (11, true) => compress_block_hc_optimal_impl::<512, 128, false, true>(full, dst, base),
+        (_, false) => compress_block_hc_optimal_impl::<16_384, { LZ4_OPT_NUM - 1 }, true, false>(
+            full, dst, base,
+        ),
+        (_, true) => compress_block_hc_optimal_impl::<16_384, { LZ4_OPT_NUM - 1 }, true, true>(
+            full, dst, base,
+        ),
+    }
+}
+
+fn compress_block_hc_optimal_impl<
+    const ATTEMPTS: usize,
+    const SUFFICIENT_LEN: usize,
+    const FULL_UPDATE: bool,
+    const FAVOR_DEC_SPEED: bool,
+>(
+    full: &[u8],
+    dst: &mut [u8],
+    base: usize,
+) -> Option<usize> {
     let src_len = full.len().checked_sub(base)?;
     if src_len == 0 {
         return emit_last_literals_with_base(full, dst, base, base, 0);
@@ -4206,9 +4726,6 @@ fn compress_block_hc_optimal(
         return emit_last_literals_with_base(full, dst, base, base, 0);
     }
 
-    let attempts = hc_search_attempts(compression_level);
-    let sufficient_len = hc_target_length(compression_level).min(LZ4_OPT_NUM - 1);
-    let full_update = normalize_hc_level(compression_level) >= LZ4HC_CLEVEL_MAX;
     let mut table = HcTables::with_base(full.len(), base);
     if base > 0 {
         table.insert_until(full, base);
@@ -4247,21 +4764,20 @@ fn compress_block_hc_optimal(
 
     while ip <= mflimit {
         let llen = ip - anchor;
-        let first_match = find_hc_longer_match(
+        let first_match = find_hc_longer_match::<FAVOR_DEC_SPEED>(
             full,
             &mut table,
             ip,
             match_limit,
             MINMATCH - 1,
-            attempts,
-            favor_dec_speed,
+            ATTEMPTS,
         );
         if first_match.len == 0 {
             ip += 1;
             continue;
         }
 
-        if first_match.len > sufficient_len {
+        if first_match.len > SUFFICIENT_LEN {
             op = encode_sequence(full, dst, anchor, ip, first_match.len, first_match.off, op)?;
             ip += first_match.len;
             anchor = ip;
@@ -4324,7 +4840,7 @@ fn compress_block_hc_optimal(
                 break;
             }
 
-            if full_update {
+            if FULL_UPDATE {
                 if opt[cur + 1].price <= opt[cur].price
                     && opt[cur + MINMATCH].price < opt[cur].price + 3
                 {
@@ -4336,26 +4852,25 @@ fn compress_block_hc_optimal(
                 continue;
             }
 
-            let min_len = if full_update {
+            let min_len = if FULL_UPDATE {
                 MINMATCH - 1
             } else {
                 last_match_pos - cur
             };
-            let new_match = find_hc_longer_match(
+            let new_match = find_hc_longer_match::<FAVOR_DEC_SPEED>(
                 full,
                 &mut table,
                 cur_ptr,
                 match_limit,
                 min_len,
-                attempts,
-                favor_dec_speed,
+                ATTEMPTS,
             );
             if new_match.len == 0 {
                 cur += 1;
                 continue;
             }
 
-            if new_match.len > sufficient_len || new_match.len + cur >= LZ4_OPT_NUM {
+            if new_match.len > SUFFICIENT_LEN || new_match.len + cur >= LZ4_OPT_NUM {
                 best_mlen = new_match.len;
                 best_off = new_match.off;
                 last_match_pos = cur + 1;
@@ -4398,7 +4913,7 @@ fn compress_block_hc_optimal(
             };
             let new_off_u32 = new_match.off as u32;
             let base_ll_u32 = base_ll as u32;
-            let dec_speed_adj = u32::from(favor_dec_speed);
+            let dec_speed_adj = u32::from(FAVOR_DEC_SPEED);
             // Hoist `hc_sequence_price`'s literals-dependent portion out of
             // the loop. Only the match-length extension term needs to be
             // recomputed per iteration, and only for `ml >= 19` (the common
@@ -4523,15 +5038,16 @@ fn compress_block_hc_optimal(
 }
 
 /// Compress a single frame-format block under the given preferences. Selects
-/// HC (with or without dictionary) when `prefs.compression_level > 0`, and the
-/// fast LZ4 block compressor otherwise. Used by the frame-format encoder.
+/// HC (with or without dictionary) when `prefs.compression_level` is at least
+/// the frame HC minimum, and the fast LZ4 block compressor otherwise. Used by
+/// the frame-format encoder.
 fn compress_frame_block(
     src: &[u8],
     dst: &mut [u8],
     prefs: &FramePrefs,
     dict: &[u8],
 ) -> Option<usize> {
-    if prefs.compression_level > 0 && !dict.is_empty() {
+    if prefs.compression_level >= LZ4HC_CLEVEL_MIN && !dict.is_empty() {
         compress_block_hc_with_dict(
             src,
             dst,
@@ -4539,7 +5055,7 @@ fn compress_frame_block(
             prefs.compression_level,
             prefs.favor_dec_speed,
         )
-    } else if prefs.compression_level > 0 {
+    } else if prefs.compression_level >= LZ4HC_CLEVEL_MIN {
         compress_block_hc(src, dst, prefs.compression_level, prefs.favor_dec_speed)
     } else {
         compress_block(src, dst, 1)
@@ -4554,37 +5070,6 @@ fn normalize_hc_level(compression_level: c_int) -> c_int {
         LZ4HC_CLEVEL_DEFAULT
     } else {
         cmp::min(compression_level, LZ4HC_CLEVEL_MAX)
-    }
-}
-
-/// Per-level `nbSearches` budget for the HC parser. Mirrors the `nbSearches`
-/// column of upstream's `LZ4HC_getCLevelParams` table (lz4hc.c).
-fn hc_search_attempts(compression_level: c_int) -> usize {
-    let level = normalize_hc_level(compression_level);
-    match level {
-        0..=2 => 2,
-        3 => 4,
-        4 => 8,
-        5 => 16,
-        6 => 32,
-        7 => 64,
-        8 => 128,
-        9 => 256,
-        10 => 96,
-        11 => 512,
-        _ => 16_384,
-    }
-}
-
-/// Per-level `targetLength` (sufficient match length) used by the HC optimal
-/// parser to short-circuit further searching. Mirrors the `targetLength`
-/// column of upstream's `LZ4HC_getCLevelParams` table.
-fn hc_target_length(compression_level: c_int) -> usize {
-    match normalize_hc_level(compression_level) {
-        10 => 64,
-        11 => 128,
-        12 => LZ4_OPT_NUM,
-        _ => 16,
     }
 }
 
@@ -4720,28 +5205,19 @@ fn append_hc_dictionary(dictionary: &mut Vec<u8>, src: &[u8]) {
     }
 }
 
-const HC_FLAG_PATTERN_ANALYSIS: u32 = 1 << 0;
-const HC_FLAG_CHAIN_SWAP: u32 = 1 << 1;
-const HC_FLAG_FAVOR_DEC_SPEED: u32 = 1 << 2;
-
 /// Insert positions up to `ip` into the HC chain and return the best forward
 /// match starting at `ip`. Mirrors upstream `LZ4HC_InsertAndFindBestMatch`
 /// (lz4hc.c:1139): pins `iLowLimit == ip`, disables chain swapping, and
 /// enables pattern analysis only when the search budget exceeds 128 (levels
 /// 9+). Used by the plain HC hash-chain parser.
-fn find_hc_match(
+fn find_hc_match<const PATTERN_ANALYSIS: bool>(
     src: &[u8],
     table: &mut HcTables,
     ip: usize,
     match_limit: usize,
     max_attempts: usize,
 ) -> HcMatch {
-    let flags = if max_attempts > 128 {
-        HC_FLAG_PATTERN_ANALYSIS
-    } else {
-        0
-    };
-    find_hc_wider_match(
+    find_hc_wider_match::<PATTERN_ANALYSIS, false, false>(
         src,
         table,
         ip,
@@ -4749,7 +5225,6 @@ fn find_hc_match(
         match_limit,
         MINMATCH - 1,
         max_attempts,
-        flags,
     )
 }
 
@@ -4759,20 +5234,15 @@ fn find_hc_match(
 /// pattern analysis and chain-swap, and applies the `favorDecSpeed` shortcut
 /// that clamps match lengths in the `(18, 36]` band down to 18.
 #[inline(always)]
-fn find_hc_longer_match(
+fn find_hc_longer_match<const FAVOR_DEC_SPEED: bool>(
     src: &[u8],
     table: &mut HcTables,
     ip: usize,
     match_limit: usize,
     min_len: usize,
     max_attempts: usize,
-    favor_dec_speed: bool,
 ) -> HcMatch {
-    let mut flags = HC_FLAG_PATTERN_ANALYSIS | HC_FLAG_CHAIN_SWAP;
-    if favor_dec_speed {
-        flags |= HC_FLAG_FAVOR_DEC_SPEED;
-    }
-    let m = find_hc_wider_match(
+    let m = find_hc_wider_match::<true, true, FAVOR_DEC_SPEED>(
         src,
         table,
         ip,
@@ -4780,7 +5250,6 @@ fn find_hc_longer_match(
         match_limit,
         min_len,
         max_attempts,
-        flags,
     );
     if m.len <= min_len {
         HcMatch {
@@ -4789,7 +5258,7 @@ fn find_hc_longer_match(
             off: 0,
         }
     } else {
-        let len = if favor_dec_speed && m.len > 18 && m.len <= 36 {
+        let len = if FAVOR_DEC_SPEED && m.len > 18 && m.len <= 36 {
             18
         } else {
             m.len
@@ -4805,7 +5274,11 @@ fn find_hc_longer_match(
 /// `flags` bitmask selects pattern analysis, chain swap, and the
 /// `favorDecompressionSpeed` shortcut that skips matches with offset < 8.
 #[inline(always)]
-fn find_hc_wider_match(
+fn find_hc_wider_match<
+    const PATTERN_ANALYSIS: bool,
+    const CHAIN_SWAP: bool,
+    const FAVOR_DEC_SPEED: bool,
+>(
     src: &[u8],
     table: &mut HcTables,
     ip: usize,
@@ -4813,11 +5286,7 @@ fn find_hc_wider_match(
     match_limit: usize,
     longest: usize,
     max_attempts: usize,
-    flags: u32,
 ) -> HcMatch {
-    let pattern_analysis = flags & HC_FLAG_PATTERN_ANALYSIS != 0;
-    let chain_swap = flags & HC_FLAG_CHAIN_SWAP != 0;
-    let favor_dec_speed = flags & HC_FLAG_FAVOR_DEC_SPEED != 0;
     table.insert_until(src, ip);
     if ip + MINMATCH > match_limit {
         return HcMatch {
@@ -4867,7 +5336,7 @@ fn find_hc_wider_match(
         // removed earlier — both are guaranteed by the loop preconditions
         // (`low_limit + best.len ≤ match_limit ≤ src_len - LAST_LITERALS`
         // and `candidate >= look_back`).
-        let early_skip = favor_dec_speed && ip - candidate < 8;
+        let early_skip = FAVOR_DEC_SPEED && ip - candidate < 8;
         if !early_skip {
             let mut passes_filter = true;
             if best.len >= 1 && candidate >= look_back {
@@ -4893,7 +5362,7 @@ fn find_hc_wider_match(
             }
         }
 
-        if chain_swap && match_len == best.len && candidate + best.len <= ip {
+        if CHAIN_SWAP && match_len == best.len && candidate + best.len <= ip {
             let mut distance_to_next: u32 = 1;
             let end = best.len.saturating_sub(MINMATCH - 1);
             let mut accel = 1usize << 4;
@@ -4922,7 +5391,7 @@ fn find_hc_wider_match(
 
         let chain_probe = candidate + match_chain_pos;
         let dist_next_match = unsafe { *chain_ptr.add(chain_probe & LZ4_DISTANCE_MAX) } as u32;
-        if pattern_analysis
+        if PATTERN_ANALYSIS
             && dist_next_match == 1
             && repeated_pattern
             && candidate_log > lowest_log
@@ -4983,7 +5452,7 @@ fn find_hc_wider_match(
                     && ip - next_candidate <= LZ4_DISTANCE_MAX
                 {
                     let max_len = cmp::min(current_segment_len, src_pattern_len);
-                    if max_len > best.len && !(favor_dec_speed && ip - next_candidate < 8) {
+                    if max_len > best.len && !(FAVOR_DEC_SPEED && ip - next_candidate < 8) {
                         best = HcMatch {
                             start: ip,
                             len: max_len,
@@ -5371,6 +5840,9 @@ fn decompress_block(src: &[u8], dst: &mut [u8]) -> Option<usize> {
         } else {
             (token & 0x0F) + MINMATCH
         };
+        if ip == iend {
+            return None;
+        }
 
         // ----- Match copy -----
         if op + match_len + 32 > oend {
@@ -5443,6 +5915,9 @@ fn decompress_block_safe(
             return None;
         }
         let match_len = read_len(src, &mut ip, (token & 0x0f) as usize)? + MINMATCH;
+        if ip == src.len() {
+            return None;
+        }
         if op + match_len > dst.len() {
             return None;
         }
@@ -5482,6 +5957,9 @@ fn decompress_block_with_dict(src: &[u8], dst: &mut [u8], dict: &[u8]) -> Option
             return None;
         }
         let match_len = read_len(src, &mut ip, (token & 0x0f) as usize)? + MINMATCH;
+        if ip == src.len() {
+            return None;
+        }
         if op + match_len > dst.len() {
             return None;
         }
@@ -5512,9 +5990,7 @@ fn decompress_block_partial_with_dict(
     if target == 0 {
         return Some(0);
     }
-    if target > dst.len() {
-        return None;
-    }
+    let target = cmp::min(target, dst.len());
 
     let mut ip = 0usize;
     let mut op = 0usize;
@@ -5523,14 +5999,17 @@ fn decompress_block_partial_with_dict(
         ip += 1;
 
         let lit_len = read_len(src, &mut ip, (token >> 4) as usize)?;
-        if ip + lit_len > src.len() || op + lit_len > dst.len() {
+        let lit_copy = cmp::min(lit_len, target - op);
+        if ip + lit_copy > src.len() {
             return None;
         }
-        let lit_copy = cmp::min(lit_len, target - op);
         dst[op..op + lit_copy].copy_from_slice(&src[ip..ip + lit_copy]);
         op += lit_copy;
         if op == target {
             return Some(op);
+        }
+        if ip + lit_len > src.len() {
+            return None;
         }
         ip += lit_len;
         if ip == src.len() {
@@ -5545,9 +6024,6 @@ fn decompress_block_partial_with_dict(
             return None;
         }
         let match_len = read_len(src, &mut ip, (token & 0x0f) as usize)? + MINMATCH;
-        if op + match_len > dst.len() {
-            return None;
-        }
         let match_copy = cmp::min(match_len, target - op);
         copy_match(dst, dict, &mut op, offset, match_copy)?;
     }
@@ -5762,6 +6238,18 @@ fn hash_fast(src: &[u8], pos: usize, by_u16: bool) -> usize {
     }
 }
 
+#[inline(always)]
+fn hash_fast_const<const BY_U16: bool>(src: &[u8], pos: usize) -> usize {
+    if BY_U16 {
+        hash4_bits(src, pos, LZ4_HASH_BITS_U16)
+    } else if usize::BITS == 64 {
+        let v = read_u64(&src[pos..]);
+        (((v << 24).wrapping_mul(889_523_592_379)) >> (64 - LZ4_HASH_BITS)) as usize
+    } else {
+        hash4_bits(src, pos, LZ4_HASH_BITS)
+    }
+}
+
 /// Knuth-multiplicative hash of the 4-byte window at `src[pos..]` into a
 /// `bits`-bit table index.
 ///
@@ -5823,6 +6311,7 @@ fn preferences_from_ptr(ptr: *const LZ4FPreferences) -> FramePrefs {
             content_size: prefs.frame_info.content_size,
             dict_id: prefs.frame_info.dict_id,
             compression_level: prefs.compression_level as c_int,
+            auto_flush: prefs.auto_flush != 0,
             favor_dec_speed: prefs.favor_dec_speed != 0,
         }
     }
@@ -5930,6 +6419,7 @@ fn parse_frame_header(src: &[u8]) -> Result<(FramePrefs, usize), usize> {
             content_size,
             dict_id,
             compression_level: 0,
+            auto_flush: false,
             favor_dec_speed: false,
         },
         pos,
@@ -6019,6 +6509,327 @@ fn apply_frame_prefs(ctx: &mut DecompressionCtx, prefs: FramePrefs) {
         ctx.dictionary.clear();
     }
     ctx.external_dictionary = false;
+    ctx.raw_block_remaining = 0;
+    ctx.raw_block_checksum = XxHash32::new(0);
+}
+
+fn start_raw_block(ctx: &mut DecompressionCtx, block_len: usize) {
+    ctx.raw_block_remaining = block_len;
+    ctx.raw_block_checksum = XxHash32::new(0);
+}
+
+macro_rules! dispatch_frame_block_flags {
+    ($ctx:expr, $skip_checksums:expr, $func:ident($($arg:expr),* $(,)?)) => {
+        match (
+            $ctx.block_checksum,
+            $ctx.content_checksum,
+            $ctx.block_independent,
+            $skip_checksums,
+        ) {
+            (false, false, false, false) => $func::<false, false, false, false>($($arg),*),
+            (false, false, false, true) => $func::<false, false, false, true>($($arg),*),
+            (false, false, true, false) => $func::<false, false, true, false>($($arg),*),
+            (false, false, true, true) => $func::<false, false, true, true>($($arg),*),
+            (false, true, false, false) => $func::<false, true, false, false>($($arg),*),
+            (false, true, false, true) => $func::<false, true, false, true>($($arg),*),
+            (false, true, true, false) => $func::<false, true, true, false>($($arg),*),
+            (false, true, true, true) => $func::<false, true, true, true>($($arg),*),
+            (true, false, false, false) => $func::<true, false, false, false>($($arg),*),
+            (true, false, false, true) => $func::<true, false, false, true>($($arg),*),
+            (true, false, true, false) => $func::<true, false, true, false>($($arg),*),
+            (true, false, true, true) => $func::<true, false, true, true>($($arg),*),
+            (true, true, false, false) => $func::<true, true, false, false>($($arg),*),
+            (true, true, false, true) => $func::<true, true, false, true>($($arg),*),
+            (true, true, true, false) => $func::<true, true, true, false>($($arg),*),
+            (true, true, true, true) => $func::<true, true, true, true>($($arg),*),
+        }
+    };
+}
+
+fn update_raw_block_output<
+    const BLOCK_CHECKSUM: bool,
+    const CONTENT_CHECKSUM: bool,
+    const BLOCK_INDEPENDENT: bool,
+    const SKIP_CHECKSUMS: bool,
+>(
+    ctx: &mut DecompressionCtx,
+    bytes: &[u8],
+) {
+    if BLOCK_CHECKSUM && !SKIP_CHECKSUMS {
+        ctx.raw_block_checksum.update(bytes);
+    }
+    if CONTENT_CHECKSUM {
+        ctx.content_hasher.update(bytes);
+    }
+    ctx.content_read += bytes.len() as u64;
+    if BLOCK_INDEPENDENT {
+        ctx.dictionary.clear();
+    } else {
+        append_hc_dictionary(&mut ctx.dictionary, bytes);
+    }
+}
+
+fn validate_content_size_after_block(ctx: &DecompressionCtx) -> Result<(), usize> {
+    if ctx.content_size != 0 && ctx.content_read > ctx.content_size {
+        Err(ERROR_FRAME_SIZE_WRONG)
+    } else {
+        Ok(())
+    }
+}
+
+fn consume_frame_end_from_slice<
+    const BLOCK_CHECKSUM: bool,
+    const CONTENT_CHECKSUM: bool,
+    const BLOCK_INDEPENDENT: bool,
+    const SKIP_CHECKSUMS: bool,
+>(
+    ctx: &mut DecompressionCtx,
+    src: &[u8],
+    consumed: &mut usize,
+) -> Option<Result<(), usize>> {
+    if src.len().saturating_sub(*consumed) < 4 {
+        return None;
+    }
+    let end_mark = u32::from_le_bytes(src[*consumed..*consumed + 4].try_into().unwrap());
+    if end_mark != 0 {
+        return Some(Ok(()));
+    }
+    let trailer = if CONTENT_CHECKSUM { 4 } else { 0 };
+    if src.len().saturating_sub(*consumed) < 4 + trailer {
+        return None;
+    }
+    *consumed += 4;
+    if CONTENT_CHECKSUM {
+        let stored = u32::from_le_bytes(src[*consumed..*consumed + 4].try_into().unwrap());
+        *consumed += 4;
+        if !SKIP_CHECKSUMS && stored != ctx.content_hasher.digest() {
+            return Some(Err(ERROR_CHECKSUM_INVALID));
+        }
+    }
+    if ctx.content_size != 0 && ctx.content_read != ctx.content_size {
+        return Some(Err(ERROR_FRAME_SIZE_WRONG));
+    }
+    ctx.done = true;
+    Some(Ok(()))
+}
+
+fn consume_frame_end_from_input<
+    const BLOCK_CHECKSUM: bool,
+    const CONTENT_CHECKSUM: bool,
+    const BLOCK_INDEPENDENT: bool,
+    const SKIP_CHECKSUMS: bool,
+>(
+    ctx: &mut DecompressionCtx,
+) -> Option<Result<(), usize>> {
+    if ctx.input.len().saturating_sub(ctx.pos) < 4 {
+        return None;
+    }
+    let end_mark = u32::from_le_bytes(ctx.input[ctx.pos..ctx.pos + 4].try_into().unwrap());
+    if end_mark != 0 {
+        return Some(Ok(()));
+    }
+    let trailer = if CONTENT_CHECKSUM { 4 } else { 0 };
+    if ctx.input.len().saturating_sub(ctx.pos) < 4 + trailer {
+        return None;
+    }
+    ctx.pos += 4;
+    if CONTENT_CHECKSUM {
+        let stored = u32::from_le_bytes(ctx.input[ctx.pos..ctx.pos + 4].try_into().unwrap());
+        ctx.pos += 4;
+        if !SKIP_CHECKSUMS && stored != ctx.content_hasher.digest() {
+            return Some(Err(ERROR_CHECKSUM_INVALID));
+        }
+    }
+    if ctx.content_size != 0 && ctx.content_read != ctx.content_size {
+        return Some(Err(ERROR_FRAME_SIZE_WRONG));
+    }
+    ctx.done = true;
+    Some(Ok(()))
+}
+
+fn finish_raw_block_checksum_from_slice<
+    const BLOCK_CHECKSUM: bool,
+    const CONTENT_CHECKSUM: bool,
+    const BLOCK_INDEPENDENT: bool,
+    const SKIP_CHECKSUMS: bool,
+>(
+    ctx: &mut DecompressionCtx,
+    src: &[u8],
+    consumed: &mut usize,
+) -> Option<Result<(), usize>> {
+    if ctx.raw_block_remaining != 0 || !BLOCK_CHECKSUM {
+        return Some(Ok(()));
+    }
+    if src.len().saturating_sub(*consumed) < 4 {
+        return None;
+    }
+    let stored = u32::from_le_bytes(src[*consumed..*consumed + 4].try_into().unwrap());
+    *consumed += 4;
+    if !SKIP_CHECKSUMS && stored != ctx.raw_block_checksum.digest() {
+        return Some(Err(ERROR_BLOCK_CHECKSUM_INVALID));
+    }
+    Some(Ok(()))
+}
+
+fn finish_raw_block_checksum_from_input<
+    const BLOCK_CHECKSUM: bool,
+    const CONTENT_CHECKSUM: bool,
+    const BLOCK_INDEPENDENT: bool,
+    const SKIP_CHECKSUMS: bool,
+>(
+    ctx: &mut DecompressionCtx,
+) -> Option<Result<(), usize>> {
+    if ctx.raw_block_remaining != 0 || !BLOCK_CHECKSUM {
+        return Some(Ok(()));
+    }
+    if ctx.input.len().saturating_sub(ctx.pos) < 4 {
+        compact_input(ctx);
+        return None;
+    }
+    let stored = u32::from_le_bytes(ctx.input[ctx.pos..ctx.pos + 4].try_into().unwrap());
+    ctx.pos += 4;
+    if !SKIP_CHECKSUMS && stored != ctx.raw_block_checksum.digest() {
+        return Some(Err(ERROR_BLOCK_CHECKSUM_INVALID));
+    }
+    Some(Ok(()))
+}
+
+fn try_copy_raw_block_slice_to_dst(
+    ctx: &mut DecompressionCtx,
+    src: &[u8],
+    dst: &mut [u8],
+    skip_checksums: bool,
+) -> Option<Result<(usize, usize), usize>> {
+    dispatch_frame_block_flags!(
+        ctx,
+        skip_checksums,
+        try_copy_raw_block_slice_to_dst_spec(ctx, src, dst)
+    )
+}
+
+fn try_copy_raw_block_slice_to_dst_spec<
+    const BLOCK_CHECKSUM: bool,
+    const CONTENT_CHECKSUM: bool,
+    const BLOCK_INDEPENDENT: bool,
+    const SKIP_CHECKSUMS: bool,
+>(
+    ctx: &mut DecompressionCtx,
+    src: &[u8],
+    dst: &mut [u8],
+) -> Option<Result<(usize, usize), usize>> {
+    if ctx.raw_block_remaining == 0 {
+        return None;
+    }
+    let to_copy = cmp::min(ctx.raw_block_remaining, cmp::min(src.len(), dst.len()));
+    if to_copy > 0 {
+        unsafe {
+            ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), to_copy);
+        }
+        update_raw_block_output::<
+            BLOCK_CHECKSUM,
+            CONTENT_CHECKSUM,
+            BLOCK_INDEPENDENT,
+            SKIP_CHECKSUMS,
+        >(ctx, &dst[..to_copy]);
+        ctx.raw_block_remaining -= to_copy;
+    }
+    let mut consumed = to_copy;
+    if ctx.raw_block_remaining == 0 {
+        match finish_raw_block_checksum_from_slice::<
+            BLOCK_CHECKSUM,
+            CONTENT_CHECKSUM,
+            BLOCK_INDEPENDENT,
+            SKIP_CHECKSUMS,
+        >(ctx, src, &mut consumed)
+        {
+            Some(Ok(())) => {}
+            Some(Err(code)) => return Some(Err(code)),
+            None => {}
+        }
+        if let Err(code) = validate_content_size_after_block(ctx) {
+            return Some(Err(code));
+        }
+        match consume_frame_end_from_slice::<
+            BLOCK_CHECKSUM,
+            CONTENT_CHECKSUM,
+            BLOCK_INDEPENDENT,
+            SKIP_CHECKSUMS,
+        >(ctx, src, &mut consumed)
+        {
+            Some(Ok(())) | None => {}
+            Some(Err(code)) => return Some(Err(code)),
+        }
+    }
+    Some(Ok((consumed, to_copy)))
+}
+
+fn copy_raw_block_from_input_to_dst(
+    ctx: &mut DecompressionCtx,
+    dst: &mut [u8],
+    skip_checksums: bool,
+) -> Option<Result<usize, usize>> {
+    dispatch_frame_block_flags!(
+        ctx,
+        skip_checksums,
+        copy_raw_block_from_input_to_dst_spec(ctx, dst)
+    )
+}
+
+fn copy_raw_block_from_input_to_dst_spec<
+    const BLOCK_CHECKSUM: bool,
+    const CONTENT_CHECKSUM: bool,
+    const BLOCK_INDEPENDENT: bool,
+    const SKIP_CHECKSUMS: bool,
+>(
+    ctx: &mut DecompressionCtx,
+    dst: &mut [u8],
+) -> Option<Result<usize, usize>> {
+    if ctx.raw_block_remaining == 0 {
+        return None;
+    }
+    let available = ctx.input.len().saturating_sub(ctx.pos);
+    let to_copy = cmp::min(ctx.raw_block_remaining, cmp::min(available, dst.len()));
+    if to_copy > 0 {
+        unsafe {
+            ptr::copy_nonoverlapping(ctx.input.as_ptr().add(ctx.pos), dst.as_mut_ptr(), to_copy);
+        }
+        ctx.pos += to_copy;
+        update_raw_block_output::<
+            BLOCK_CHECKSUM,
+            CONTENT_CHECKSUM,
+            BLOCK_INDEPENDENT,
+            SKIP_CHECKSUMS,
+        >(ctx, &dst[..to_copy]);
+        ctx.raw_block_remaining -= to_copy;
+    }
+    if ctx.raw_block_remaining == 0 {
+        match finish_raw_block_checksum_from_input::<
+            BLOCK_CHECKSUM,
+            CONTENT_CHECKSUM,
+            BLOCK_INDEPENDENT,
+            SKIP_CHECKSUMS,
+        >(ctx)
+        {
+            Some(Ok(())) => {}
+            Some(Err(code)) => return Some(Err(code)),
+            None => {}
+        }
+        if let Err(code) = validate_content_size_after_block(ctx) {
+            return Some(Err(code));
+        }
+        match consume_frame_end_from_input::<
+            BLOCK_CHECKSUM,
+            CONTENT_CHECKSUM,
+            BLOCK_INDEPENDENT,
+            SKIP_CHECKSUMS,
+        >(ctx)
+        {
+            Some(Ok(())) | None => {}
+            Some(Err(code)) => return Some(Err(code)),
+        }
+    }
+    compact_input(ctx);
+    Some(Ok(to_copy))
 }
 
 /// Reconstruct an `LZ4F_frameInfo_t` C struct from the current decompression
@@ -6066,6 +6877,23 @@ fn frame_info_from_decompression_ctx(ctx: &DecompressionCtx) -> LZ4FFrameInfo {
 fn try_decompress_frame_block_to_dst(
     ctx: &mut DecompressionCtx,
     dst: &mut [u8],
+    skip_checksums: bool,
+) -> Option<Result<usize, usize>> {
+    dispatch_frame_block_flags!(
+        ctx,
+        skip_checksums,
+        try_decompress_frame_block_to_dst_spec(ctx, dst)
+    )
+}
+
+fn try_decompress_frame_block_to_dst_spec<
+    const BLOCK_CHECKSUM: bool,
+    const CONTENT_CHECKSUM: bool,
+    const BLOCK_INDEPENDENT: bool,
+    const SKIP_CHECKSUMS: bool,
+>(
+    ctx: &mut DecompressionCtx,
+    dst: &mut [u8],
 ) -> Option<Result<usize, usize>> {
     if ctx.done || !ctx.parsed_header || !pending_is_empty(ctx) {
         return None;
@@ -6083,23 +6911,29 @@ fn try_decompress_frame_block_to_dst(
     if block_len > ctx.block_max {
         return Some(Err(ERROR_MAX_BLOCK_SIZE_INVALID));
     }
-    let checksum_len = if ctx.block_checksum { 4 } else { 0 };
+    let checksum_len = if BLOCK_CHECKSUM { 4 } else { 0 };
+    if raw {
+        ctx.pos += 4;
+        start_raw_block(ctx, block_len);
+        return copy_raw_block_from_input_to_dst_spec::<
+            BLOCK_CHECKSUM,
+            CONTENT_CHECKSUM,
+            BLOCK_INDEPENDENT,
+            SKIP_CHECKSUMS,
+        >(ctx, dst);
+    }
     if ctx.input.len().saturating_sub(ctx.pos) < 4 + block_len + checksum_len {
         compact_input(ctx);
         return None;
     }
-    if raw {
-        if dst.len() < block_len {
-            return None;
-        }
-    } else if dst.len() < ctx.block_max {
+    if dst.len() < ctx.block_max {
         return None;
     }
 
     ctx.pos += 4;
     let block_start = ctx.pos;
     let block_end = block_start + block_len;
-    if ctx.block_checksum {
+    if BLOCK_CHECKSUM && !SKIP_CHECKSUMS {
         let stored = u32::from_le_bytes(
             ctx.input[block_end..block_end + checksum_len]
                 .try_into()
@@ -6110,47 +6944,31 @@ fn try_decompress_frame_block_to_dst(
         }
     }
 
-    let written = if raw {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                ctx.input.as_ptr().add(block_start),
-                dst.as_mut_ptr(),
-                block_len,
-            );
-        }
-        block_len
+    let n = if BLOCK_INDEPENDENT && ctx.dictionary.is_empty() {
+        decompress_block(&ctx.input[block_start..block_end], dst)
     } else {
-        let n = if ctx.block_independent && ctx.dictionary.is_empty() {
-            decompress_block(&ctx.input[block_start..block_end], dst)
-        } else {
-            decompress_block_with_dict(&ctx.input[block_start..block_end], dst, &ctx.dictionary)
-        };
-        match n {
-            Some(n) => n,
-            None => return Some(Err(ERROR_DECOMPRESSION_FAILED)),
-        }
+        decompress_block_with_dict(&ctx.input[block_start..block_end], dst, &ctx.dictionary)
+    };
+    let written = match n {
+        Some(n) => n,
+        None => return Some(Err(ERROR_DECOMPRESSION_FAILED)),
     };
 
-    if ctx.content_checksum {
-        if raw {
-            ctx.content_hasher
-                .update(&ctx.input[block_start..block_end]);
-        } else {
-            ctx.content_hasher.update(&dst[..written]);
-        }
+    if CONTENT_CHECKSUM {
+        ctx.content_hasher.update(&dst[..written]);
     }
     ctx.content_read += written as u64;
-    if !ctx.block_independent {
-        append_hc_dictionary(&mut ctx.dictionary, &dst[..written]);
-    } else {
+    if BLOCK_INDEPENDENT {
         ctx.dictionary.clear();
+    } else {
+        append_hc_dictionary(&mut ctx.dictionary, &dst[..written]);
     }
     ctx.pos = block_end + checksum_len;
     if ctx.content_size != 0 && ctx.content_read > ctx.content_size {
         return Some(Err(ERROR_FRAME_SIZE_WRONG));
     }
     if ctx.content_size != 0 {
-        let trailer = if ctx.content_checksum { 4 } else { 0 };
+        let trailer = if CONTENT_CHECKSUM { 4 } else { 0 };
         if ctx.input.len().saturating_sub(ctx.pos) >= 4 {
             let end_mark = u32::from_le_bytes(ctx.input[ctx.pos..ctx.pos + 4].try_into().unwrap());
             if end_mark != 0 {
@@ -6161,10 +6979,10 @@ fn try_decompress_frame_block_to_dst(
                 return Some(Err(ERROR_FRAME_SIZE_WRONG));
             } else if ctx.input.len().saturating_sub(ctx.pos) >= 4 + trailer {
                 ctx.pos += 4;
-                if ctx.content_checksum {
+                if CONTENT_CHECKSUM {
                     let stored =
                         u32::from_le_bytes(ctx.input[ctx.pos..ctx.pos + 4].try_into().unwrap());
-                    if stored != ctx.content_hasher.digest() {
+                    if !SKIP_CHECKSUMS && stored != ctx.content_hasher.digest() {
                         return Some(Err(ERROR_CHECKSUM_INVALID));
                     }
                     ctx.pos += 4;
@@ -6189,6 +7007,24 @@ fn try_decompress_frame_block_slice_to_dst(
     ctx: &mut DecompressionCtx,
     src: &[u8],
     dst: &mut [u8],
+    skip_checksums: bool,
+) -> Option<Result<(usize, usize), usize>> {
+    dispatch_frame_block_flags!(
+        ctx,
+        skip_checksums,
+        try_decompress_frame_block_slice_to_dst_spec(ctx, src, dst)
+    )
+}
+
+fn try_decompress_frame_block_slice_to_dst_spec<
+    const BLOCK_CHECKSUM: bool,
+    const CONTENT_CHECKSUM: bool,
+    const BLOCK_INDEPENDENT: bool,
+    const SKIP_CHECKSUMS: bool,
+>(
+    ctx: &mut DecompressionCtx,
+    src: &[u8],
+    dst: &mut [u8],
 ) -> Option<Result<(usize, usize), usize>> {
     if src.len() < 4 {
         return None;
@@ -6197,11 +7033,11 @@ fn try_decompress_frame_block_slice_to_dst(
     let raw = block_header & 0x8000_0000 != 0;
     let block_len = (block_header & 0x7FFF_FFFF) as usize;
     if block_len == 0 {
-        let trailer = if ctx.content_checksum { 4 } else { 0 };
+        let trailer = if CONTENT_CHECKSUM { 4 } else { 0 };
         if src.len() < 4 + trailer {
             return None;
         }
-        if ctx.content_checksum {
+        if CONTENT_CHECKSUM && !SKIP_CHECKSUMS {
             let stored = u32::from_le_bytes(src[4..8].try_into().unwrap());
             if stored != ctx.content_hasher.digest() {
                 return Some(Err(ERROR_CHECKSUM_INVALID));
@@ -6217,21 +7053,27 @@ fn try_decompress_frame_block_slice_to_dst(
         return Some(Err(ERROR_MAX_BLOCK_SIZE_INVALID));
     }
 
-    let checksum_len = if ctx.block_checksum { 4 } else { 0 };
+    let checksum_len = if BLOCK_CHECKSUM { 4 } else { 0 };
+    if raw {
+        start_raw_block(ctx, block_len);
+        return try_copy_raw_block_slice_to_dst_spec::<
+            BLOCK_CHECKSUM,
+            CONTENT_CHECKSUM,
+            BLOCK_INDEPENDENT,
+            SKIP_CHECKSUMS,
+        >(ctx, &src[4..], dst)
+        .map(|result| result.map(|(consumed, written)| (consumed + 4, written)));
+    }
     if src.len() < 4 + block_len + checksum_len {
         return None;
     }
-    if raw {
-        if dst.len() < block_len {
-            return None;
-        }
-    } else if dst.len() < ctx.block_max {
+    if dst.len() < ctx.block_max {
         return None;
     }
 
     let block_start = 4;
     let block_end = block_start + block_len;
-    if ctx.block_checksum {
+    if BLOCK_CHECKSUM && !SKIP_CHECKSUMS {
         let stored =
             u32::from_le_bytes(src[block_end..block_end + checksum_len].try_into().unwrap());
         if stored != xxhash32(&src[block_start..block_end], 0) {
@@ -6239,35 +7081,24 @@ fn try_decompress_frame_block_slice_to_dst(
         }
     }
 
-    let written = if raw {
-        unsafe {
-            ptr::copy_nonoverlapping(src.as_ptr().add(block_start), dst.as_mut_ptr(), block_len);
-        }
-        block_len
+    let n = if BLOCK_INDEPENDENT && ctx.dictionary.is_empty() {
+        decompress_block(&src[block_start..block_end], dst)
     } else {
-        let n = if ctx.block_independent && ctx.dictionary.is_empty() {
-            decompress_block(&src[block_start..block_end], dst)
-        } else {
-            decompress_block_with_dict(&src[block_start..block_end], dst, &ctx.dictionary)
-        };
-        match n {
-            Some(n) => n,
-            None => return Some(Err(ERROR_DECOMPRESSION_FAILED)),
-        }
+        decompress_block_with_dict(&src[block_start..block_end], dst, &ctx.dictionary)
+    };
+    let written = match n {
+        Some(n) => n,
+        None => return Some(Err(ERROR_DECOMPRESSION_FAILED)),
     };
 
-    if ctx.content_checksum {
-        if raw {
-            ctx.content_hasher.update(&src[block_start..block_end]);
-        } else {
-            ctx.content_hasher.update(&dst[..written]);
-        }
+    if CONTENT_CHECKSUM {
+        ctx.content_hasher.update(&dst[..written]);
     }
     ctx.content_read += written as u64;
-    if !ctx.block_independent {
-        append_hc_dictionary(&mut ctx.dictionary, &dst[..written]);
-    } else {
+    if BLOCK_INDEPENDENT {
         ctx.dictionary.clear();
+    } else {
+        append_hc_dictionary(&mut ctx.dictionary, &dst[..written]);
     }
     if ctx.content_size != 0 && ctx.content_read > ctx.content_size {
         return Some(Err(ERROR_FRAME_SIZE_WRONG));
@@ -6282,7 +7113,18 @@ fn try_decompress_frame_block_slice_to_dst(
 ///
 /// Mirrors the staged decompression loop of upstream `LZ4F_decompress`
 /// (lz4frame.c).
-fn parse_available_frame(ctx: &mut DecompressionCtx) -> Result<(), usize> {
+fn parse_available_frame(ctx: &mut DecompressionCtx, skip_checksums: bool) -> Result<(), usize> {
+    dispatch_frame_block_flags!(ctx, skip_checksums, parse_available_frame_spec(ctx))
+}
+
+fn parse_available_frame_spec<
+    const BLOCK_CHECKSUM: bool,
+    const CONTENT_CHECKSUM: bool,
+    const BLOCK_INDEPENDENT: bool,
+    const SKIP_CHECKSUMS: bool,
+>(
+    ctx: &mut DecompressionCtx,
+) -> Result<(), usize> {
     if ctx.done {
         return Ok(());
     }
@@ -6299,16 +7141,16 @@ fn parse_available_frame(ctx: &mut DecompressionCtx) -> Result<(), usize> {
         let raw = block_header & 0x8000_0000 != 0;
         let block_len = (block_header & 0x7FFF_FFFF) as usize;
         if block_len == 0 {
-            let trailer = if ctx.content_checksum { 4 } else { 0 };
+            let trailer = if CONTENT_CHECKSUM { 4 } else { 0 };
             if ctx.input.len().saturating_sub(ctx.pos) < 4 + trailer {
                 compact_input(ctx);
                 return Ok(());
             }
             ctx.pos += 4;
-            if ctx.content_checksum {
+            if CONTENT_CHECKSUM {
                 let stored =
                     u32::from_le_bytes(ctx.input[ctx.pos..ctx.pos + 4].try_into().unwrap());
-                if stored != ctx.content_hasher.digest() {
+                if !SKIP_CHECKSUMS && stored != ctx.content_hasher.digest() {
                     return Err(ERROR_CHECKSUM_INVALID);
                 }
                 ctx.pos += 4;
@@ -6323,15 +7165,21 @@ fn parse_available_frame(ctx: &mut DecompressionCtx) -> Result<(), usize> {
         if block_len > ctx.block_max {
             return Err(ERROR_MAX_BLOCK_SIZE_INVALID);
         }
-        let checksum_len = if ctx.block_checksum { 4 } else { 0 };
-        if ctx.input.len().saturating_sub(ctx.pos) < 4 + block_len + checksum_len {
+        let checksum_len = if BLOCK_CHECKSUM { 4 } else { 0 };
+        ctx.pos += 4;
+        let block_start = ctx.pos;
+        if raw {
+            start_raw_block(ctx, block_len);
             compact_input(ctx);
             return Ok(());
         }
-        ctx.pos += 4;
-        let block_start = ctx.pos;
+        if ctx.input.len().saturating_sub(ctx.pos - 4) < 4 + block_len + checksum_len {
+            ctx.pos -= 4;
+            compact_input(ctx);
+            return Ok(());
+        }
         let block_end = block_start + block_len;
-        if ctx.block_checksum {
+        if BLOCK_CHECKSUM && !SKIP_CHECKSUMS {
             let stored = u32::from_le_bytes(
                 ctx.input[block_end..block_end + checksum_len]
                     .try_into()
@@ -6341,44 +7189,28 @@ fn parse_available_frame(ctx: &mut DecompressionCtx) -> Result<(), usize> {
                 return Err(ERROR_BLOCK_CHECKSUM_INVALID);
             }
         }
-        if raw {
-            if ctx.content_checksum {
-                ctx.content_hasher
-                    .update(&ctx.input[block_start..block_end]);
-            }
-            ctx.content_read += block_len as u64;
-            ctx.pending
-                .extend_from_slice(&ctx.input[block_start..block_end]);
-            if !ctx.block_independent {
-                append_hc_dictionary(&mut ctx.dictionary, &ctx.input[block_start..block_end]);
-            } else {
-                ctx.dictionary.clear();
-            }
-            ctx.pos = block_end + checksum_len;
+        let mut out = vec![0u8; ctx.block_max];
+        let n = if BLOCK_INDEPENDENT && ctx.dictionary.is_empty() {
+            decompress_block(&ctx.input[block_start..block_end], &mut out)
         } else {
-            let mut out = vec![0u8; ctx.block_max];
-            let n = if ctx.block_independent && ctx.dictionary.is_empty() {
-                decompress_block(&ctx.input[block_start..block_end], &mut out)
-            } else {
-                decompress_block_with_dict(
-                    &ctx.input[block_start..block_end],
-                    &mut out,
-                    &ctx.dictionary,
-                )
-            }
-            .ok_or(ERROR_DECOMPRESSION_FAILED)?;
-            if ctx.content_checksum {
-                ctx.content_hasher.update(&out[..n]);
-            }
-            ctx.content_read += n as u64;
-            ctx.pending.extend_from_slice(&out[..n]);
-            if !ctx.block_independent {
-                append_hc_dictionary(&mut ctx.dictionary, &out[..n]);
-            } else {
-                ctx.dictionary.clear();
-            }
-            ctx.pos = block_end + checksum_len;
+            decompress_block_with_dict(
+                &ctx.input[block_start..block_end],
+                &mut out,
+                &ctx.dictionary,
+            )
         }
+        .ok_or(ERROR_DECOMPRESSION_FAILED)?;
+        if CONTENT_CHECKSUM {
+            ctx.content_hasher.update(&out[..n]);
+        }
+        ctx.content_read += n as u64;
+        ctx.pending.extend_from_slice(&out[..n]);
+        if BLOCK_INDEPENDENT {
+            ctx.dictionary.clear();
+        } else {
+            append_hc_dictionary(&mut ctx.dictionary, &out[..n]);
+        }
+        ctx.pos = block_end + checksum_len;
         if ctx.content_size != 0 && ctx.content_read > ctx.content_size {
             return Err(ERROR_FRAME_SIZE_WRONG);
         }
@@ -6459,6 +7291,8 @@ fn frame_hint(ctx: &DecompressionCtx) -> usize {
             7
         };
         expected.saturating_sub(available)
+    } else if ctx.raw_block_remaining > 0 {
+        ctx.raw_block_remaining + if ctx.block_checksum { 4 } else { 0 } + 4
     } else if pending_is_empty(ctx) {
         let available = ctx.input.len().saturating_sub(ctx.pos);
         if available < 4 {
@@ -6475,6 +7309,22 @@ fn frame_hint(ctx: &DecompressionCtx) -> usize {
     } else {
         1
     }
+}
+
+fn decompression_free_status(ctx: &DecompressionCtx) -> usize {
+    if ctx.done || (!ctx.parsed_header && ctx.input.is_empty() && pending_is_empty(ctx)) {
+        return 0;
+    }
+    if !ctx.parsed_header {
+        return if ctx.input.is_empty() { 0 } else { 1 };
+    }
+    if !pending_is_empty(ctx) {
+        return 9;
+    }
+    if ctx.raw_block_remaining > 0 {
+        return 5;
+    }
+    3
 }
 
 /// Map the 4..=7 BD-byte block-size id to its `BlockSize` enum variant.
@@ -6689,9 +7539,19 @@ mod tests {
                     b"ERROR_maxBlockSize_invalid".as_slice(),
                 ),
                 (
+                    ERROR_BLOCK_MODE_INVALID,
+                    3,
+                    b"ERROR_blockMode_invalid".as_slice(),
+                ),
+                (
                     ERROR_PARAMETER_INVALID,
                     4,
                     b"ERROR_parameter_invalid".as_slice(),
+                ),
+                (
+                    ERROR_COMPRESSION_LEVEL_INVALID,
+                    5,
+                    b"ERROR_compressionLevel_invalid".as_slice(),
                 ),
                 (
                     ERROR_HEADER_VERSION_WRONG,
@@ -6707,6 +7567,16 @@ mod tests {
                     ERROR_RESERVED_FLAG_SET,
                     8,
                     b"ERROR_reservedFlag_set".as_slice(),
+                ),
+                (
+                    ERROR_ALLOCATION_FAILED,
+                    9,
+                    b"ERROR_allocation_failed".as_slice(),
+                ),
+                (
+                    ERROR_SRC_SIZE_TOO_LARGE,
+                    10,
+                    b"ERROR_srcSize_tooLarge".as_slice(),
                 ),
                 (
                     ERROR_DST_TOO_SMALL,
@@ -6755,6 +7625,8 @@ mod tests {
                     b"ERROR_compressionState_uninitialized".as_slice(),
                 ),
                 (ERROR_PARAMETER_NULL, 21, b"ERROR_parameter_null".as_slice()),
+                (ERROR_IO_WRITE, 22, b"ERROR_io_write".as_slice()),
+                (ERROR_IO_READ, 23, b"ERROR_io_read".as_slice()),
             ];
             for (value, code, name) in cases {
                 assert_eq!(LZ4F_isError(value), 1);
@@ -6765,6 +7637,13 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn frame_default_block_size_id_maps_to_64kb() {
+        assert_eq!(LZ4F_getBlockSize(0), 64 * 1024);
+        assert_eq!(LZ4F_getBlockSize(4), 64 * 1024);
+        assert_eq!(LZ4F_getBlockSize(3), ERROR_MAX_BLOCK_SIZE_INVALID);
     }
 
     #[test]
@@ -6853,6 +7732,55 @@ mod tests {
     }
 
     #[test]
+    fn block_fast_accepts_null_empty_source_and_rejects_oversize() {
+        unsafe {
+            let mut dst = [0u8; 16];
+            let empty_len = LZ4_compress_fast(
+                ptr::null(),
+                dst.as_mut_ptr() as *mut c_char,
+                0,
+                dst.len() as c_int,
+                1,
+            );
+            assert_eq!(empty_len, 1);
+            assert_eq!(dst[0], 0);
+
+            assert_eq!(
+                LZ4_compress_fast(
+                    ptr::null(),
+                    dst.as_mut_ptr() as *mut c_char,
+                    1,
+                    dst.len() as c_int,
+                    1,
+                ),
+                0
+            );
+
+            let src = [0u8; 1];
+            assert_eq!(
+                LZ4_compress_fast(
+                    src.as_ptr() as *const c_char,
+                    dst.as_mut_ptr() as *mut c_char,
+                    LZ4_MAX_INPUT_SIZE + 1,
+                    dst.len() as c_int,
+                    1,
+                ),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn acceleration_is_clamped_to_upstream_range() {
+        assert_eq!(normalize_acceleration(c_int::MIN), 1);
+        assert_eq!(normalize_acceleration(0), 1);
+        assert_eq!(normalize_acceleration(4), 4);
+        assert_eq!(normalize_acceleration(65_537), 65_537);
+        assert_eq!(normalize_acceleration(65_538), 65_537);
+        assert_eq!(normalize_acceleration(c_int::MAX), 65_537);
+    }
+
+    #[test]
     fn block_dest_size_and_ext_state_round_trip() {
         let input = b"dest-size-data-".repeat(2048);
         let bound = unsafe { LZ4_compressBound(input.len() as c_int) } as usize;
@@ -6869,6 +7797,7 @@ mod tests {
             )
         };
         assert!(compressed_len > 0);
+        assert!(state.iter().any(|&b| b != 0));
 
         let mut output = vec![0u8; input.len()];
         let output_len = unsafe {
@@ -6895,6 +7824,97 @@ mod tests {
         assert!(tiny_len > 0);
         assert!(src_size > 0);
         assert!(src_size < input.len() as c_int);
+
+        let mut dest_state = vec![0u8; LZ4_sizeofState() as usize];
+        src_size = input.len() as c_int;
+        let null_state_len = unsafe {
+            LZ4_compress_destSize_extState(
+                std::ptr::null_mut(),
+                input.as_ptr() as *const c_char,
+                tiny.as_mut_ptr() as *mut c_char,
+                &mut src_size,
+                tiny.len() as c_int,
+                1,
+            )
+        };
+        assert_eq!(null_state_len, 0);
+
+        let mut fast_accel4 = vec![0u8; bound];
+        let fast_accel4_len = unsafe {
+            LZ4_compress_fast(
+                input.as_ptr() as *const c_char,
+                fast_accel4.as_mut_ptr() as *mut c_char,
+                input.len() as c_int,
+                fast_accel4.len() as c_int,
+                4,
+            )
+        };
+        assert!(fast_accel4_len > 0);
+
+        let mut dest_accel4 = vec![0u8; bound];
+        src_size = input.len() as c_int;
+        let dest_accel4_len = unsafe {
+            LZ4_compress_destSize_extState(
+                dest_state.as_mut_ptr() as *mut c_void,
+                input.as_ptr() as *const c_char,
+                dest_accel4.as_mut_ptr() as *mut c_char,
+                &mut src_size,
+                dest_accel4.len() as c_int,
+                4,
+            )
+        };
+        assert_eq!(src_size as usize, input.len());
+        assert_eq!(dest_accel4_len, fast_accel4_len);
+        assert!(dest_state.iter().any(|&b| b != 0));
+        assert_eq!(
+            &dest_accel4[..dest_accel4_len as usize],
+            &fast_accel4[..fast_accel4_len as usize]
+        );
+
+        let mut fast_reset = vec![0u8; bound];
+        let fast_reset_len = unsafe {
+            LZ4_compress_fast_extState_fastReset(
+                state.as_mut_ptr() as *mut c_void,
+                input.as_ptr() as *const c_char,
+                fast_reset.as_mut_ptr() as *mut c_char,
+                input.len() as c_int,
+                fast_reset.len() as c_int,
+                4,
+            )
+        };
+        assert_eq!(fast_reset_len, fast_accel4_len);
+        assert_eq!(
+            &fast_reset[..fast_reset_len as usize],
+            &fast_accel4[..fast_accel4_len as usize]
+        );
+
+        let mut hc_state = vec![0u8; LZ4_sizeofStateHC() as usize];
+        let hc_stream =
+            unsafe { LZ4_initStreamHC(hc_state.as_mut_ptr() as *mut c_void, hc_state.len()) };
+        assert!(!hc_stream.is_null());
+        let mut hc_fast_reset = vec![0u8; bound];
+        let hc_fast_reset_len = unsafe {
+            LZ4_compress_HC_extStateHC_fastReset(
+                hc_state.as_mut_ptr() as *mut c_void,
+                input.as_ptr() as *const c_char,
+                hc_fast_reset.as_mut_ptr() as *mut c_char,
+                input.len() as c_int,
+                hc_fast_reset.len() as c_int,
+                9,
+            )
+        };
+        assert!(hc_fast_reset_len > 0);
+        output.fill(0);
+        let hc_output_len = unsafe {
+            LZ4_decompress_safe(
+                hc_fast_reset.as_ptr() as *const c_char,
+                output.as_mut_ptr() as *mut c_char,
+                hc_fast_reset_len,
+                output.len() as c_int,
+            )
+        };
+        assert_eq!(hc_output_len as usize, input.len());
+        assert_eq!(output, input);
     }
 
     #[test]
@@ -7233,11 +8253,24 @@ mod tests {
                 input.len() as c_int,
                 favored.len() as c_int,
             );
-            LZ4_freeStreamHC(stream);
-
             assert!(favored_len > 0);
             assert!(favored_len >= normal_len);
             assert!(!block_has_offset_below(&favored[..favored_len as usize], 8));
+
+            LZ4_resetStreamHC(stream, 10);
+            let mut reset = vec![0u8; bound as usize];
+            let reset_len = LZ4_compress_HC_continue(
+                stream,
+                input.as_ptr() as *const c_char,
+                reset.as_mut_ptr() as *mut c_char,
+                input.len() as c_int,
+                reset.len() as c_int,
+            );
+            LZ4_freeStreamHC(stream);
+
+            assert_eq!(reset_len, normal_len);
+            assert_eq!(&reset[..reset_len as usize], &normal[..normal_len as usize]);
+            assert!(block_has_offset_below(&reset[..reset_len as usize], 8));
 
             let mut output = vec![0u8; input.len()];
             let output_len = LZ4_decompress_safe(
@@ -7413,6 +8446,74 @@ mod tests {
     }
 
     #[test]
+    fn decompress_safe_rejects_block_ending_in_match() {
+        let compressed = [0x15, b'a', 0x01, 0x00];
+        let mut output = vec![0u8; 10];
+
+        let output_len = unsafe {
+            LZ4_decompress_safe(
+                compressed.as_ptr() as *const c_char,
+                output.as_mut_ptr() as *mut c_char,
+                compressed.len() as c_int,
+                output.len() as c_int,
+            )
+        };
+        assert_eq!(output_len, -1);
+
+        let dict_compressed = [0x02u8, 0x03, 0x00];
+        let dict = b"abc";
+        let mut dict_output = vec![0u8; 6];
+        let dict_output_len = unsafe {
+            LZ4_decompress_safe_usingDict(
+                dict_compressed.as_ptr() as *const c_char,
+                dict_output.as_mut_ptr() as *mut c_char,
+                dict_compressed.len() as c_int,
+                dict_output.len() as c_int,
+                dict.as_ptr() as *const c_char,
+                dict.len() as c_int,
+            )
+        };
+        assert_eq!(dict_output_len, -1);
+    }
+
+    #[test]
+    fn decompress_safe_partial_clamps_target_to_capacity() {
+        let compressed = [
+            0xa0, b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h', b'i', b'j',
+        ];
+        let mut output = vec![0u8; 5];
+
+        let output_len = unsafe {
+            LZ4_decompress_safe_partial(
+                compressed.as_ptr() as *const c_char,
+                output.as_mut_ptr() as *mut c_char,
+                compressed.len() as c_int,
+                10,
+                output.len() as c_int,
+            )
+        };
+        assert_eq!(output_len, output.len() as c_int);
+        assert_eq!(&output, b"abcde");
+
+        let dict_compressed = [0x02u8, 0x03, 0x00];
+        let dict = b"abc";
+        let mut dict_output = vec![0u8; 4];
+        let dict_output_len = unsafe {
+            LZ4_decompress_safe_partial_usingDict(
+                dict_compressed.as_ptr() as *const c_char,
+                dict_output.as_mut_ptr() as *mut c_char,
+                dict_compressed.len() as c_int,
+                9,
+                dict_output.len() as c_int,
+                dict.as_ptr() as *const c_char,
+                dict.len() as c_int,
+            )
+        };
+        assert_eq!(dict_output_len, dict_output.len() as c_int);
+        assert_eq!(&dict_output, b"abca");
+    }
+
+    #[test]
     fn decompress_fast_returns_consumed_bytes() {
         let input = b"fast decode consumed bytes ".repeat(256);
         let bound = unsafe { LZ4_compressBound(input.len() as c_int) } as usize;
@@ -7463,7 +8564,7 @@ mod tests {
                 compressed.as_ptr() as *const c_char,
                 output.as_mut_ptr() as *mut c_char,
                 compressed.len() as c_int,
-                0,
+                2,
             )
         };
         assert_eq!(len, 0);
@@ -7472,14 +8573,15 @@ mod tests {
     #[test]
     fn streaming_decode_uses_dictionary() {
         unsafe {
-            let compressed = [0x02, 0x03, 0x00];
-            let mut direct = vec![0u8; 6];
+            let compressed = [0x08, 0x03, 0x00, 0x50, b'a', b'b', b'c', b'd', b'e'];
+            let expected = b"abcabcabcabcabcde";
+            let mut direct = vec![0u8; expected.len()];
             assert_eq!(
                 decompress_block_with_dict(&compressed, &mut direct, b"abc"),
-                Some(6)
+                Some(expected.len())
             );
             let dict = b"abc";
-            let mut using_dict = vec![0u8; 6];
+            let mut using_dict = vec![0u8; expected.len()];
             let using_dict_len = LZ4_decompress_safe_usingDict(
                 compressed.as_ptr() as *const c_char,
                 using_dict.as_mut_ptr() as *mut c_char,
@@ -7489,7 +8591,7 @@ mod tests {
                 dict.len() as c_int,
             );
             assert_eq!(using_dict_len, using_dict.len() as c_int);
-            assert_eq!(using_dict, b"abcabc");
+            assert_eq!(using_dict, expected);
 
             let stream = LZ4_createStreamDecode();
             assert!(!stream.is_null());
@@ -7497,7 +8599,7 @@ mod tests {
                 LZ4_setStreamDecode(stream, dict.as_ptr() as *const c_char, dict.len() as c_int),
                 1
             );
-            let mut output = vec![0u8; 6];
+            let mut output = vec![0u8; expected.len()];
             let len = LZ4_decompress_safe_continue(
                 stream,
                 compressed.as_ptr() as *const c_char,
@@ -7506,18 +8608,19 @@ mod tests {
                 output.len() as c_int,
             );
             assert_eq!(len, output.len() as c_int);
-            assert_eq!(output, b"abcabc");
+            assert_eq!(output, expected);
             LZ4_freeStreamDecode(stream);
         }
     }
 
     #[test]
     fn decompress_match_copy_handles_small_overlap() {
-        let compressed = [0x15, b'a', 0x01, 0x00];
-        let mut output = vec![0u8; 10];
+        let compressed = [0x15, b'a', 0x01, 0x00, 0x50, b'b', b'c', b'd', b'e', b'f'];
+        let mut output = vec![0u8; 15];
 
-        assert_eq!(decompress_block(&compressed, &mut output), Some(10));
-        assert_eq!(output, b"aaaaaaaaaa");
+        assert_eq!(decompress_block(&compressed, &mut output), Some(15));
+        assert_eq!(&output[..10], &[b'a'; 10]);
+        assert_eq!(&output[10..], b"bcdef");
 
         let mut partial = vec![0u8; 10];
         assert_eq!(
@@ -7529,16 +8632,18 @@ mod tests {
 
     #[test]
     fn decompress_match_copy_spans_dictionary_and_prefix() {
-        let compressed = [0x24, b'd', b'e', 0x04, 0x00];
-        let mut output = vec![0u8; 10];
+        let compressed = [
+            0x24, b'd', b'e', 0x04, 0x00, 0x50, b'f', b'g', b'h', b'i', b'j',
+        ];
+        let mut output = vec![0u8; 15];
 
         assert_eq!(
             decompress_block_with_dict(&compressed, &mut output, b"abc"),
-            Some(10)
+            Some(15)
         );
-        assert_eq!(output, b"debcdebcde");
+        assert_eq!(output, b"debcdebcdefghij");
 
-        let mut fast_output = vec![0u8; 10];
+        let mut fast_output = vec![0u8; 15];
         let consumed = unsafe {
             LZ4_decompress_fast_usingDict(
                 compressed.as_ptr() as *const c_char,
@@ -7549,7 +8654,7 @@ mod tests {
             )
         };
         assert_eq!(consumed, compressed.len() as c_int);
-        assert_eq!(fast_output, b"debcdebcde");
+        assert_eq!(fast_output, b"debcdebcdefghij");
     }
 
     #[test]
@@ -8550,7 +9655,8 @@ mod tests {
 
             let options = LZ4FDecompressOptions {
                 stable_dst: 1,
-                reserved: [0; 3],
+                skipChecksums: 0,
+                reserved: [0; 2],
             };
             let mut output = [0u8; 37];
             let mut src_size = encoded.len() - consumed;
@@ -8761,6 +9867,74 @@ mod tests {
     }
 
     #[test]
+    fn frame_free_decompression_context_reports_incomplete_frame() {
+        unsafe {
+            let input = b"incomplete frame free status";
+            let prefs = LZ4FPreferences {
+                frame_info: LZ4FFrameInfo {
+                    block_size_id: BlockSize::Max64KB,
+                    block_mode: BlockMode::Independent,
+                    content_checksum_flag: ContentChecksum::NoChecksum,
+                    frame_type: FrameType::Frame,
+                    content_size: 0,
+                    dict_id: 0,
+                    block_checksum_flag: BlockChecksum::NoBlockChecksum,
+                },
+                compression_level: 0,
+                auto_flush: 0,
+                favor_dec_speed: 0,
+                reserved: [0; 3],
+            };
+            let mut frame = vec![0u8; LZ4F_compressBound(input.len(), &prefs)];
+            let frame_len = LZ4F_compressFrame(
+                frame.as_mut_ptr() as *mut c_void,
+                frame.len(),
+                input.as_ptr() as *const c_void,
+                input.len(),
+                &prefs,
+            );
+            assert_eq!(LZ4F_isError(frame_len), 0);
+            frame.truncate(frame_len);
+
+            let mut dctx = LZ4FDecompressionContext(ptr::null_mut());
+            assert_eq!(LZ4F_createDecompressionContext(&mut dctx, LZ4F_VERSION), 0);
+            assert_eq!(LZ4F_freeDecompressionContext(dctx), 0);
+
+            assert_eq!(LZ4F_createDecompressionContext(&mut dctx, LZ4F_VERSION), 0);
+            let mut info = LZ4FFrameInfo {
+                block_size_id: BlockSize::Default,
+                block_mode: BlockMode::Linked,
+                content_checksum_flag: ContentChecksum::NoChecksum,
+                frame_type: FrameType::Frame,
+                content_size: 0,
+                dict_id: 0,
+                block_checksum_flag: BlockChecksum::NoBlockChecksum,
+            };
+            let mut consumed = frame.len();
+            let info_code = LZ4F_getFrameInfo(dctx, &mut info, frame.as_ptr(), &mut consumed);
+            assert_eq!(LZ4F_isError(info_code), 0);
+            assert!(consumed > 0);
+            assert_ne!(LZ4F_freeDecompressionContext(dctx), 0);
+
+            assert_eq!(LZ4F_createDecompressionContext(&mut dctx, LZ4F_VERSION), 0);
+            let mut output = vec![0u8; input.len()];
+            let mut src_size = frame.len();
+            let mut dst_size = output.len();
+            let code = LZ4F_decompress(
+                dctx,
+                output.as_mut_ptr(),
+                &mut dst_size,
+                frame.as_ptr(),
+                &mut src_size,
+                ptr::null(),
+            );
+            assert_eq!(code, 0);
+            assert_eq!(output, input);
+            assert_eq!(LZ4F_freeDecompressionContext(dctx), 0);
+        }
+    }
+
+    #[test]
     fn frame_update_compresses_blocks_when_level_is_set() {
         unsafe {
             let mut cctx = LZ4FCompressionContext(ptr::null_mut());
@@ -8864,6 +10038,206 @@ mod tests {
             );
             assert_eq!(code, ERROR_DST_TOO_SMALL);
             LZ4F_freeCompressionContext(cctx);
+        }
+    }
+
+    #[test]
+    fn frame_update_buffers_partial_block_until_flush_or_end() {
+        unsafe {
+            let mut cctx = LZ4FCompressionContext(ptr::null_mut());
+            assert_eq!(LZ4F_createCompressionContext(&mut cctx, LZ4F_VERSION), 0);
+            let prefs = LZ4FPreferences {
+                frame_info: LZ4FFrameInfo {
+                    block_size_id: BlockSize::Max64KB,
+                    block_mode: BlockMode::Independent,
+                    content_checksum_flag: ContentChecksum::NoChecksum,
+                    frame_type: FrameType::Frame,
+                    content_size: 0,
+                    dict_id: 0,
+                    block_checksum_flag: BlockChecksum::NoBlockChecksum,
+                },
+                compression_level: 0,
+                auto_flush: 0,
+                favor_dec_speed: 0,
+                reserved: [0; 3],
+            };
+            let input = b"buffered partial frame block";
+            let mut encoded = vec![0u8; LZ4F_compressBound(input.len(), &prefs) + 32];
+            let mut pos = LZ4F_compressBegin(cctx, encoded.as_mut_ptr(), encoded.len(), &prefs);
+            let update_len = LZ4F_compressUpdate(
+                cctx,
+                encoded.as_mut_ptr().add(pos),
+                encoded.len() - pos,
+                input.as_ptr(),
+                input.len(),
+                ptr::null(),
+            );
+            assert_eq!(update_len, 0);
+            let flush_len = LZ4F_flush(
+                cctx,
+                encoded.as_mut_ptr().add(pos),
+                encoded.len() - pos,
+                ptr::null(),
+            );
+            assert_eq!(LZ4F_isError(flush_len), 0);
+            assert!(flush_len > 4);
+            pos += flush_len;
+            let end_len = LZ4F_compressEnd(
+                cctx,
+                encoded.as_mut_ptr().add(pos),
+                encoded.len() - pos,
+                ptr::null(),
+            );
+            assert_eq!(end_len, 4);
+            pos += end_len;
+            encoded.truncate(pos);
+            LZ4F_freeCompressionContext(cctx);
+
+            let decoded = decode_frame_once(&encoded, input.len());
+            assert_eq!(decoded, input);
+        }
+    }
+
+    #[test]
+    fn frame_compress_end_flushes_buffered_partial_block() {
+        unsafe {
+            let mut cctx = LZ4FCompressionContext(ptr::null_mut());
+            assert_eq!(LZ4F_createCompressionContext(&mut cctx, LZ4F_VERSION), 0);
+            let prefs = LZ4FPreferences {
+                frame_info: LZ4FFrameInfo {
+                    block_size_id: BlockSize::Max64KB,
+                    block_mode: BlockMode::Independent,
+                    content_checksum_flag: ContentChecksum::NoChecksum,
+                    frame_type: FrameType::Frame,
+                    content_size: 0,
+                    dict_id: 0,
+                    block_checksum_flag: BlockChecksum::NoBlockChecksum,
+                },
+                compression_level: 0,
+                auto_flush: 0,
+                favor_dec_speed: 0,
+                reserved: [0; 3],
+            };
+            let input = b"finish flushes this tail";
+            let mut encoded = vec![0u8; LZ4F_compressBound(input.len(), &prefs) + 32];
+            let mut pos = LZ4F_compressBegin(cctx, encoded.as_mut_ptr(), encoded.len(), &prefs);
+            assert_eq!(
+                LZ4F_compressUpdate(
+                    cctx,
+                    encoded.as_mut_ptr().add(pos),
+                    encoded.len() - pos,
+                    input.as_ptr(),
+                    input.len(),
+                    ptr::null(),
+                ),
+                0
+            );
+            let end_len = LZ4F_compressEnd(
+                cctx,
+                encoded.as_mut_ptr().add(pos),
+                encoded.len() - pos,
+                ptr::null(),
+            );
+            assert_eq!(LZ4F_isError(end_len), 0);
+            assert!(end_len > 4);
+            pos += end_len;
+            encoded.truncate(pos);
+            LZ4F_freeCompressionContext(cctx);
+
+            let decoded = decode_frame_once(&encoded, input.len());
+            assert_eq!(decoded, input);
+        }
+    }
+
+    #[test]
+    fn frame_compress_end_rejects_declared_content_size_mismatch() {
+        unsafe {
+            let mut cctx = LZ4FCompressionContext(ptr::null_mut());
+            assert_eq!(LZ4F_createCompressionContext(&mut cctx, LZ4F_VERSION), 0);
+            let input = b"short";
+            let prefs = LZ4FPreferences {
+                frame_info: LZ4FFrameInfo {
+                    block_size_id: BlockSize::Max64KB,
+                    block_mode: BlockMode::Independent,
+                    content_checksum_flag: ContentChecksum::NoChecksum,
+                    frame_type: FrameType::Frame,
+                    content_size: input.len() as u64 + 1,
+                    dict_id: 0,
+                    block_checksum_flag: BlockChecksum::NoBlockChecksum,
+                },
+                compression_level: 0,
+                auto_flush: 0,
+                favor_dec_speed: 0,
+                reserved: [0; 3],
+            };
+            let mut output = vec![0u8; LZ4F_compressBound(input.len(), &prefs) + 32];
+            let mut pos = LZ4F_compressBegin(cctx, output.as_mut_ptr(), output.len(), &prefs);
+            assert_eq!(LZ4F_isError(pos), 0);
+            let update_len = LZ4F_compressUpdate(
+                cctx,
+                output.as_mut_ptr().add(pos),
+                output.len() - pos,
+                input.as_ptr(),
+                input.len(),
+                ptr::null(),
+            );
+            assert_eq!(update_len, 0);
+            pos += update_len;
+            assert_eq!(
+                LZ4F_compressEnd(
+                    cctx,
+                    output.as_mut_ptr().add(pos),
+                    output.len() - pos,
+                    ptr::null(),
+                ),
+                ERROR_FRAME_SIZE_WRONG
+            );
+            LZ4F_freeCompressionContext(cctx);
+        }
+    }
+
+    #[test]
+    fn frame_compress_frame_corrects_nonzero_declared_content_size() {
+        unsafe {
+            let input = b"actual content size";
+            let mut prefs = LZ4FPreferences {
+                frame_info: LZ4FFrameInfo {
+                    block_size_id: BlockSize::Max64KB,
+                    block_mode: BlockMode::Independent,
+                    content_checksum_flag: ContentChecksum::NoChecksum,
+                    frame_type: FrameType::Frame,
+                    content_size: input.len() as u64 + 100,
+                    dict_id: 0,
+                    block_checksum_flag: BlockChecksum::NoBlockChecksum,
+                },
+                compression_level: 0,
+                auto_flush: 0,
+                favor_dec_speed: 0,
+                reserved: [0; 3],
+            };
+            let mut encoded = vec![0u8; LZ4F_compressFrameBound(input.len(), &prefs)];
+            let encoded_len = LZ4F_compressFrame(
+                encoded.as_mut_ptr() as *mut c_void,
+                encoded.len(),
+                input.as_ptr() as *const c_void,
+                input.len(),
+                &prefs,
+            );
+            assert_eq!(LZ4F_isError(encoded_len), 0);
+            encoded.truncate(encoded_len);
+            assert_eq!(decode_frame_once(&encoded, input.len()), input);
+
+            let mut dctx = LZ4FDecompressionContext(ptr::null_mut());
+            assert_eq!(LZ4F_createDecompressionContext(&mut dctx, LZ4F_VERSION), 0);
+            prefs.frame_info.content_size = 0;
+            let mut info = prefs.frame_info;
+            let mut src_size = encoded.len();
+            assert_eq!(
+                LZ4F_getFrameInfo(dctx, &mut info, encoded.as_ptr(), &mut src_size),
+                0
+            );
+            assert_eq!(info.content_size, input.len() as u64);
+            LZ4F_freeDecompressionContext(dctx);
         }
     }
 
@@ -9024,11 +10398,96 @@ mod tests {
                     & 0x7FFF_FFFF) as usize;
             bad_block[header_len + 4 + block_len] ^= 0x80;
             assert_corrupt_frame_fails("block checksum", &bad_block, input.len());
+            assert_corrupt_frame_decodes_with_skip_checksums("block checksum", &bad_block, &input);
+            assert_corrupt_frame_decodes_with_sticky_skip_checksums(
+                "block checksum",
+                &bad_block,
+                &input,
+                header_len,
+            );
 
             let mut bad_content = encoded;
             let last = bad_content.len() - 1;
             bad_content[last] ^= 0x80;
             assert_corrupt_frame_fails("content checksum", &bad_content, input.len());
+            assert_corrupt_frame_decodes_with_skip_checksums(
+                "content checksum",
+                &bad_content,
+                &input,
+            );
+            assert_corrupt_frame_decodes_with_sticky_skip_checksums(
+                "content checksum",
+                &bad_content,
+                &input,
+                header_len,
+            );
+        }
+    }
+
+    #[test]
+    fn frame_decompress_raw_block_consumes_only_output_capacity() {
+        unsafe {
+            let input = b"raw block incremental payload";
+            let mut frame = frame_header_for_test(
+                ContentChecksum::NoChecksum,
+                BlockChecksum::NoBlockChecksum,
+                0,
+            );
+            frame.extend_from_slice(&((input.len() as u32) | 0x8000_0000).to_le_bytes());
+            frame.extend_from_slice(input);
+            frame.extend_from_slice(&0u32.to_le_bytes());
+
+            let mut dctx = LZ4FDecompressionContext(ptr::null_mut());
+            assert_eq!(LZ4F_createDecompressionContext(&mut dctx, LZ4F_VERSION), 0);
+            let mut info = LZ4FFrameInfo {
+                block_size_id: BlockSize::Default,
+                block_mode: BlockMode::Linked,
+                content_checksum_flag: ContentChecksum::NoChecksum,
+                frame_type: FrameType::Frame,
+                content_size: 0,
+                dict_id: 0,
+                block_checksum_flag: BlockChecksum::NoBlockChecksum,
+            };
+            let mut header_size = frame.len();
+            assert_eq!(
+                LZ4F_getFrameInfo(dctx, &mut info, frame.as_ptr(), &mut header_size),
+                0
+            );
+
+            let payload = &frame[header_size..];
+            let mut first = [0u8; 5];
+            let mut src_size = payload.len();
+            let mut dst_size = first.len();
+            let hint = LZ4F_decompress(
+                dctx,
+                first.as_mut_ptr(),
+                &mut dst_size,
+                payload.as_ptr(),
+                &mut src_size,
+                ptr::null(),
+            );
+            assert_eq!(LZ4F_isError(hint), 0);
+            assert_eq!(dst_size, first.len());
+            assert_eq!(src_size, 4 + first.len());
+            assert_eq!(&first, &input[..first.len()]);
+
+            let rest_payload = &payload[src_size..];
+            let mut rest = vec![0u8; input.len() - first.len()];
+            let mut rest_src_size = rest_payload.len();
+            let mut rest_dst_size = rest.len();
+            let code = LZ4F_decompress(
+                dctx,
+                rest.as_mut_ptr(),
+                &mut rest_dst_size,
+                rest_payload.as_ptr(),
+                &mut rest_src_size,
+                ptr::null(),
+            );
+            assert_eq!(code, 0);
+            assert_eq!(rest_src_size, rest_payload.len());
+            assert_eq!(rest_dst_size, rest.len());
+            assert_eq!(&rest, &input[first.len()..]);
+            LZ4F_freeDecompressionContext(dctx);
         }
     }
 
@@ -9171,8 +10630,8 @@ mod tests {
                     frame.extend_from_slice(b"ab");
                     frame
                 },
-                3,
-                0,
+                7,
+                2,
             );
 
             let with_block_checksum = frame_header_for_test(
@@ -9189,7 +10648,7 @@ mod tests {
                     frame
                 },
                 4,
-                0,
+                3,
             );
 
             let with_content_checksum = frame_header_for_test(
@@ -9235,20 +10694,14 @@ mod tests {
             };
             let mut encoded = vec![0u8; 128];
             let mut pos = LZ4F_compressBegin(cctx, encoded.as_mut_ptr(), encoded.len(), &prefs);
-            pos += LZ4F_compressUpdate(
-                cctx,
-                encoded.as_mut_ptr().add(pos),
-                encoded.len() - pos,
-                input.as_ptr(),
-                input.len(),
-                ptr::null(),
-            );
-            pos += LZ4F_compressEnd(
-                cctx,
-                encoded.as_mut_ptr().add(pos),
-                encoded.len() - pos,
-                ptr::null(),
-            );
+            assert_eq!(LZ4F_isError(pos), 0);
+            encoded[pos..pos + 4]
+                .copy_from_slice(&((input.len() as u32) | 0x8000_0000).to_le_bytes());
+            pos += 4;
+            encoded[pos..pos + input.len()].copy_from_slice(input);
+            pos += input.len();
+            encoded[pos..pos + 4].copy_from_slice(&0u32.to_le_bytes());
+            pos += 4;
             encoded.truncate(pos);
             LZ4F_freeCompressionContext(cctx);
 
@@ -9301,6 +10754,81 @@ mod tests {
                 offset += src_size;
             }
             panic!("{kind} corrupt frame did not report checksum failure");
+        }
+    }
+
+    fn assert_corrupt_frame_decodes_with_skip_checksums(kind: &str, encoded: &[u8], input: &[u8]) {
+        unsafe {
+            let mut dctx = LZ4FDecompressionContext(ptr::null_mut());
+            assert_eq!(LZ4F_createDecompressionContext(&mut dctx, LZ4F_VERSION), 0);
+            let options = LZ4FDecompressOptions {
+                stable_dst: 0,
+                skipChecksums: 1,
+                reserved: [0; 2],
+            };
+            let mut output = vec![0u8; input.len()];
+            let mut src_size = encoded.len();
+            let mut dst_size = output.len();
+            let code = LZ4F_decompress(
+                dctx,
+                output.as_mut_ptr(),
+                &mut dst_size,
+                encoded.as_ptr(),
+                &mut src_size,
+                &options,
+            );
+            assert_eq!(code, 0, "{kind}");
+            assert_eq!(src_size, encoded.len(), "{kind}");
+            assert_eq!(dst_size, input.len(), "{kind}");
+            assert_eq!(output, input, "{kind}");
+            LZ4F_freeDecompressionContext(dctx);
+        }
+    }
+
+    fn assert_corrupt_frame_decodes_with_sticky_skip_checksums(
+        kind: &str,
+        encoded: &[u8],
+        input: &[u8],
+        header_len: usize,
+    ) {
+        unsafe {
+            let mut dctx = LZ4FDecompressionContext(ptr::null_mut());
+            assert_eq!(LZ4F_createDecompressionContext(&mut dctx, LZ4F_VERSION), 0);
+            let options = LZ4FDecompressOptions {
+                stable_dst: 0,
+                skipChecksums: 1,
+                reserved: [0; 2],
+            };
+            let mut src_size = header_len;
+            let mut dst_size = 0usize;
+            let code = LZ4F_decompress(
+                dctx,
+                ptr::null_mut(),
+                &mut dst_size,
+                encoded.as_ptr(),
+                &mut src_size,
+                &options,
+            );
+            assert_eq!(LZ4F_isError(code), 0, "{kind}");
+            assert_eq!(src_size, header_len, "{kind}");
+            assert_eq!(dst_size, 0, "{kind}");
+
+            let mut output = vec![0u8; input.len()];
+            src_size = encoded.len() - header_len;
+            dst_size = output.len();
+            let code = LZ4F_decompress(
+                dctx,
+                output.as_mut_ptr(),
+                &mut dst_size,
+                encoded.as_ptr().add(header_len),
+                &mut src_size,
+                ptr::null(),
+            );
+            assert_eq!(code, 0, "{kind}");
+            assert_eq!(src_size, encoded.len() - header_len, "{kind}");
+            assert_eq!(dst_size, input.len(), "{kind}");
+            assert_eq!(output, input, "{kind}");
+            LZ4F_freeDecompressionContext(dctx);
         }
     }
 
@@ -9358,6 +10886,36 @@ mod tests {
         assert_eq!(dst_size, expected_output, "{case}");
         assert_eq!(src_size, frame.len(), "{case}");
         LZ4F_freeDecompressionContext(dctx);
+    }
+
+    unsafe fn decode_frame_once(frame: &[u8], output_len: usize) -> Vec<u8> {
+        let mut dctx = LZ4FDecompressionContext(ptr::null_mut());
+        assert_eq!(LZ4F_createDecompressionContext(&mut dctx, LZ4F_VERSION), 0);
+        let mut output = vec![0u8; output_len + 16];
+        let mut src_offset = 0usize;
+        let mut dst_offset = 0usize;
+        loop {
+            let mut src_size = frame.len() - src_offset;
+            let mut dst_size = output.len() - dst_offset;
+            let code = LZ4F_decompress(
+                dctx,
+                output.as_mut_ptr().add(dst_offset),
+                &mut dst_size,
+                frame.as_ptr().add(src_offset),
+                &mut src_size,
+                ptr::null(),
+            );
+            assert_eq!(LZ4F_isError(code), 0);
+            src_offset += src_size;
+            dst_offset += dst_size;
+            if code == 0 {
+                break;
+            }
+        }
+        assert_eq!(src_offset, frame.len());
+        output.truncate(dst_offset);
+        LZ4F_freeDecompressionContext(dctx);
+        output
     }
 
     #[test]
@@ -9624,6 +11182,32 @@ mod tests {
                 assert_eq!(LZ4F_isError(encoded_len), 0, "level {level}");
                 assert_eq!(encoded_len, expected.len(), "level {level}");
                 assert_eq!(&encoded[..encoded_len], &expected, "level {level}");
+            }
+        }
+    }
+
+    #[test]
+    fn frame_levels_one_and_two_use_fast_path() {
+        unsafe {
+            let input = patterned_hc_input(32 * 1024);
+            let mut expected = Vec::new();
+            for level in [0, 1, 2] {
+                let prefs = hc_frame_fixture_prefs(level);
+                let mut encoded = vec![0u8; LZ4F_compressFrameBound(input.len(), &prefs)];
+                let encoded_len = LZ4F_compressFrame(
+                    encoded.as_mut_ptr() as *mut c_void,
+                    encoded.len(),
+                    input.as_ptr() as *const c_void,
+                    input.len(),
+                    &prefs,
+                );
+                assert_eq!(LZ4F_isError(encoded_len), 0, "level {level}");
+                encoded.truncate(encoded_len);
+                if level == 0 {
+                    expected = encoded;
+                } else {
+                    assert_eq!(encoded, expected, "level {level}");
+                }
             }
         }
     }

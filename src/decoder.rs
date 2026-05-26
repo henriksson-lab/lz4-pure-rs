@@ -141,6 +141,15 @@ impl<R: Read> Read for Decoder<R> {
                 // until it is no longer emitting them, even after it
                 // has finished reading bytes.
                 if dst_size == 0 && src_size == 0 {
+                    if dst_offset > 0 {
+                        return Ok(dst_offset);
+                    }
+                    if self.len == 0 && len != 0 {
+                        return Err(Error::new(
+                            ErrorKind::UnexpectedEof,
+                            "unexpected end of compressed stream",
+                        ));
+                    }
                     return Ok(dst_offset);
                 }
 
@@ -352,8 +361,7 @@ mod test {
         let text: Vec<u8> = vec![b'a'; 100];
         enc.write_all(&text[..]).unwrap();
 
-        // flush the encoder
-        enc.flush().unwrap();
+        let encoded = finish_encode(enc);
 
         // read from the decoder, buf_size bytes at a time
         for buf_size in [5, 10, 15, 20, 25] {
@@ -362,7 +370,7 @@ mod test {
             let mut total_bytes_read = 0;
 
             // create a decoder wrapping the backing buffer
-            let mut dec = crate::Decoder::new(&enc.writer()[..]).unwrap();
+            let mut dec = crate::Decoder::new(&encoded[..]).unwrap();
             while let Ok(n) = dec.read(&mut buf[..]) {
                 if n == 0 {
                     break;
@@ -372,6 +380,23 @@ mod test {
             }
 
             assert_eq!(total_bytes_read, text.len());
+        }
+    }
+
+    #[test]
+    fn truncated_frame_reports_unexpected_eof() {
+        let mut encoder = EncoderBuilder::new().level(1).build(Vec::new()).unwrap();
+        encoder.write_all(b"truncated frame").unwrap();
+        let (encoded, result) = encoder.finish();
+        result.unwrap();
+        for missing in [1, 4] {
+            let mut truncated = encoded.clone();
+            truncated.truncate(truncated.len() - missing);
+
+            let mut decoder = Decoder::new(Cursor::new(truncated)).unwrap();
+            let mut actual = Vec::new();
+            let err = decoder.read_to_end(&mut actual).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
         }
     }
 

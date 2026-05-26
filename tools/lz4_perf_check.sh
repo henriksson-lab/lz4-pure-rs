@@ -6,7 +6,19 @@ WORKDIR="${LZ4_PURE_PERF_DIR:-/tmp/lz4-pure-perf}"
 RUST_LZ4="$ROOT/target/release/lz4"
 SYSTEM_LZ4="${SYSTEM_LZ4:-lz4}"
 RUNS="${LZ4_PURE_PERF_RUNS:-1}"
+PARITY_SWEEP="${LZ4_PURE_PARITY_SWEEP:-0}"
 SOURCE_REPEAT_STAMP="$WORKDIR/source-repeat.sha256"
+CORPUS_NAMES=(
+    random64
+    zeros64
+    source-repeat
+    loglike
+    fasta-like
+    dictionary-heavy
+    binary-artifact
+    many-small.tar
+    already-compressed
+)
 
 mkdir -p "$WORKDIR"
 
@@ -109,6 +121,7 @@ run_one() {
     time_command "system compress" "$WORKDIR/$name.system.compress.time" /dev/null "$SYSTEM_LZ4" -q -f "$input" "$system_lz4"
     "$SYSTEM_LZ4" -q -t "$rust_lz4" >/dev/null
     "$RUST_LZ4" -t "$system_lz4" >/dev/null
+    cmp "$rust_lz4" "$system_lz4"
 
     printf '%-34s%s bytes\n' "rust compressed size" "$(wc -c < "$rust_lz4")"
     printf '%-34s%s bytes\n' "system compressed size" "$(wc -c < "$system_lz4")"
@@ -119,25 +132,51 @@ run_one() {
     cmp "$system_out" "$input"
 }
 
-make_corpus
-run_one random64
-run_one zeros64
-run_one source-repeat
-run_one loglike
-run_one fasta-like
-run_one dictionary-heavy
-run_one binary-artifact
-run_one many-small.tar
-run_one already-compressed
+run_parity_sweep() {
+    echo
+    echo "== byte-parity sweep: default and levels 1..12 =="
+    "$SYSTEM_LZ4" --version 2>&1 | sed 's/^/system /'
+    local level rust_args system_args suffix input rust_lz4 system_lz4
+    for name in "${CORPUS_NAMES[@]}"; do
+        input="$WORKDIR/$name.bin"
+        for level in default $(seq 1 12); do
+            suffix="$level"
+            rust_lz4="$WORKDIR/$name.rust.level-$suffix.lz4"
+            system_lz4="$WORKDIR/$name.system.level-$suffix.lz4"
+            rust_args=()
+            system_args=(-q)
+            if [ "$level" != default ]; then
+                rust_args=(-l "$level")
+                system_args+=("-$level")
+            fi
+            "$RUST_LZ4" "${rust_args[@]}" -f "$input" "$rust_lz4"
+            "$SYSTEM_LZ4" "${system_args[@]}" -f "$input" "$system_lz4"
+            cmp "$rust_lz4" "$system_lz4"
+        done
+        printf '  %-24s ok\n' "$name"
+    done
+}
 
-echo
-echo "== source-repeat HC level 9 ($(wc -c < "$WORKDIR/source-repeat.bin") bytes) =="
-time_command "rust hc9 compress" "$WORKDIR/source-repeat.rust.hc9.compress.time" /dev/null "$RUST_LZ4" -l 9 -f "$WORKDIR/source-repeat.bin" "$WORKDIR/source-repeat.rust.hc9.lz4"
-time_command "system hc9 compress" "$WORKDIR/source-repeat.system.hc9.compress.time" /dev/null "$SYSTEM_LZ4" -q -9 -f "$WORKDIR/source-repeat.bin" "$WORKDIR/source-repeat.system.hc9.lz4"
-"$SYSTEM_LZ4" -q -t "$WORKDIR/source-repeat.rust.hc9.lz4" >/dev/null
-"$RUST_LZ4" -t "$WORKDIR/source-repeat.system.hc9.lz4" >/dev/null
-printf '%-34s%s bytes\n' "rust hc9 compressed size" "$(wc -c < "$WORKDIR/source-repeat.rust.hc9.lz4")"
-printf '%-34s%s bytes\n' "system hc9 compressed size" "$(wc -c < "$WORKDIR/source-repeat.system.hc9.lz4")"
+make_corpus
+for name in "${CORPUS_NAMES[@]}"; do
+    run_one "$name"
+done
+
+for level in 9 10 11 12; do
+    echo
+    echo "== source-repeat HC level $level ($(wc -c < "$WORKDIR/source-repeat.bin") bytes) =="
+    time_command "rust hc$level compress" "$WORKDIR/source-repeat.rust.hc$level.compress.time" /dev/null "$RUST_LZ4" -l "$level" -f "$WORKDIR/source-repeat.bin" "$WORKDIR/source-repeat.rust.hc$level.lz4"
+    time_command "system hc$level compress" "$WORKDIR/source-repeat.system.hc$level.compress.time" /dev/null "$SYSTEM_LZ4" -q "-$level" -f "$WORKDIR/source-repeat.bin" "$WORKDIR/source-repeat.system.hc$level.lz4"
+    "$SYSTEM_LZ4" -q -t "$WORKDIR/source-repeat.rust.hc$level.lz4" >/dev/null
+    "$RUST_LZ4" -t "$WORKDIR/source-repeat.system.hc$level.lz4" >/dev/null
+    cmp "$WORKDIR/source-repeat.rust.hc$level.lz4" "$WORKDIR/source-repeat.system.hc$level.lz4"
+    printf '%-34s%s bytes\n' "rust hc$level compressed size" "$(wc -c < "$WORKDIR/source-repeat.rust.hc$level.lz4")"
+    printf '%-34s%s bytes\n' "system hc$level compressed size" "$(wc -c < "$WORKDIR/source-repeat.system.hc$level.lz4")"
+done
+
+if [ "$PARITY_SWEEP" = "1" ]; then
+    run_parity_sweep
+fi
 
 cat "$WORKDIR/source-repeat.system.lz4" "$WORKDIR/random64.system.lz4" > "$WORKDIR/concat.system.lz4"
 cat "$WORKDIR/source-repeat.bin" "$WORKDIR/random64.bin" > "$WORKDIR/concat.expected"
